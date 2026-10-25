@@ -69,11 +69,14 @@ SECTIONS = [
     ("fuel", "Fuel, DEF, MPG, range / fuel stop", 200),
     ("gauges", "Gauges: oil, air, water, battery, brakes", 412),
     ("job", "Job: destination, distance, time", 280),
+    ("weather", "Weather forecast (needs a weather director running)", 300),
     ("clock", "Clock + rest timer", 110),
 ]
 
 SETTINGS = os.environ.get("TRUCKBAR_SETTINGS") or os.path.join(os.environ.get("APPDATA", "."), "TruckBar", "settings.json")
 SETTINGS_DIR = os.path.dirname(os.path.abspath(SETTINGS))
+# An optional forecast written by a separate weather program; the section only shows while it exists.
+FORECAST = os.environ.get("TRUCKBAR_FORECAST") or os.path.join(os.environ.get("APPDATA", "."), "WeatherDirector", "forecast.json")
 DEFAULTS = {"x": None, "y": 0, "scale": 1.0, "alpha": 0.85, "locked": False,
             "gear_names": "auto", "clock_24h": False, "fuel_margin_km": 120, "wiper_speeds": 3, "show": {k: True for k, _, _ in SECTIONS}}
 
@@ -313,7 +316,21 @@ class Bar:
 
     # -- window plumbing ------------------------------------------------------
     def shown(self):
-        return [(k, w) for k, _, w in SECTIONS if self.s["show"].get(k, True)]
+        return [(k, w) for k, _, w in SECTIONS if self.s["show"].get(k, True)
+                and (k != "weather" or self.forecast() is not None)]
+
+    def forecast(self):
+        """The weather director's latest forecast, re-read every few seconds; None if there isn't a fresh one."""
+        now = time.time()
+        if now - getattr(self, "_fc_read", 0) > 5:
+            self._fc_read = now
+            try:
+                with open(FORECAST, encoding="utf-8") as f:
+                    fc = json.load(f)
+                self._fc = fc if now - fc.get("updated", 0) < 6 * 3600 else None
+            except (OSError, ValueError):
+                self._fc = None
+        return self._fc
 
     def size(self):
         k = self.s["scale"]
@@ -909,6 +926,49 @@ class Bar:
                        fill=TXT, font=self.f(14, "bold"))
         cv.create_text(k(10), k(94), anchor="w", text="ROUTE LEFT", fill=DIM, font=self.f(7))
         cv.create_text(k(144), k(94), anchor="w", text="TIME LEFT", fill=DIM, font=self.f(7))
+
+    def s_weather(self, t, c):
+        """The road ahead: the sky now, what's coming and when, and conditions on arrival."""
+        cv, k = self.cv, self.k
+        fc = self.forecast()
+        if fc is None:
+            return
+        road = fc.get("road") or {}
+        place = fc["place"].split(",")[0]
+        if len(place) > 20:
+            place = place[:19].rstrip() + "…"
+        cv.create_text(k(10), k(22), anchor="w", text=f"{fc['date_label'].upper()}  ·  {place}",
+                       fill=DIM, font=self.f(8, "bold"))
+        if fc.get("alert"):
+            cv.create_text(k(290), k(22), anchor="e", text=fc["alert"].split()[0].upper(), fill=AMBER,
+                           font=self.f(8, "bold"))
+        else:
+            hi, lo = road.get("high", fc.get("high")), road.get("low", fc.get("low"))
+            cv.create_text(k(290), k(22), anchor="e", text=f"H{hi}° L{lo}°", fill=DIM, font=self.f(8, "bold"))
+        temp = road.get("temp", fc["now"]["temp"])
+        cv.create_text(k(10), k(48), anchor="w", text=f"{temp}°", fill=TXT, font=self.f(20, "bold"))
+        cv.create_text(k(78), k(48), anchor="w", text=road.get("now_sky", fc["now"]["sky"]), fill=TXT,
+                       font=self.f(9), width=k(165))
+        ahead = road.get("ahead", "")
+        quiet = ahead.startswith("Dry for")
+        lines = [(ahead, BLUE if road.get("wet_now") else (DIM if quiet else TXT)),
+                 (road.get("later", ""), DIM)]
+        for (text, col), y in zip(lines, (72, 92)):
+            if not text:
+                continue
+            font = self.f(9 if y == 72 else 8)
+            fm, avail = tkfont.Font(font=font), k(282)
+            if fm.measure(text) > avail:                 # trim to fit the pane
+                while text and fm.measure(text + "…") > avail:
+                    text = text[:-1]
+                text = text.rstrip() + "…"
+            cv.create_text(k(10), k(y), anchor="w", text=text, fill=col, font=font)
+
+    def clock_text(self, minutes):
+        h24, mins = (minutes // 60) % 24, minutes % 60
+        if self.s.get("clock_24h", False):
+            return f"{h24:02d}:{mins:02d}"
+        return f"{(h24 % 12) or 12}:{mins:02d} {'AM' if h24 < 12 else 'PM'}"
 
     def s_clock(self, t, c):
         cv, k = self.cv, self.k

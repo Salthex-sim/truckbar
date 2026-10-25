@@ -30,6 +30,7 @@ From left to right. Every section can be switched off.
 | **Fuel** | Fuel gauge with reserve zone, DEF/AdBlue level, air pressure, average economy, and **range / fuel stop**: whether your fuel covers the rest of the job, or how far you can go before you need to stop |
 | **Gauges** | Oil pressure, oil temperature, coolant temperature, battery voltage, brake temperature |
 | **Job** | Destination, cargo and its weight, distance and time left |
+| **Weather** *(optional)* | The weather now, what's coming next and conditions at your destination, when a weather program provides a forecast (see [Weather pane](#weather-pane)) |
 | **Clock** | In-game day and time (12- or 24-hour) and time until you need to rest |
 
 ### Reading the speedometer
@@ -92,6 +93,22 @@ layout selected, both the dash and TruckBar show 18-speed names, and the top gea
 
 The game's built-in layouts (such as "splitter") have no names, so those show gear numbers.
 You can also tick **"Gear names like the dash"** off in Settings to always show numbers.
+
+### Weather pane
+
+The game's telemetry says nothing about the weather, so TruckBar doesn't forecast it itself.
+Instead, the pane shows a forecast written by a separate weather program, if you run one,
+and stays hidden otherwise. It reads `%APPDATA%\WeatherDirector\forecast.json` (or the file
+named by the `TRUCKBAR_FORECAST` environment variable) every few seconds:
+
+```
+OCT 24 · Colorado Springs      H46° L28°
+46°  Mostly cloudy
+Rain in 1½ hours
+At Denver: Rain, 42°
+```
+
+The pane can be switched off like any other section in Settings.
 
 ### Units
 
