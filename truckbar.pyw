@@ -935,13 +935,15 @@ class Bar:
             return
         road = fc.get("road") or {}
         place = fc["place"].split(",")[0]
-        if len(place) > 20:
-            place = place[:19].rstrip() + "…"
+        alert = (fc.get("alert") or "").upper()
+        room = 12 if alert else 20                       # an alert takes the right-hand side
+        if len(place) > room:
+            place = place[:room - 1].rstrip() + "…"
         cv.create_text(k(10), k(22), anchor="w", text=f"{fc['date_label'].upper()}  ·  {place}",
                        fill=DIM, font=self.f(8, "bold"))
-        if fc.get("alert"):
-            cv.create_text(k(290), k(22), anchor="e", text=fc["alert"].split()[0].upper(), fill=AMBER,
-                           font=self.f(8, "bold"))
+        if alert:
+            cv.create_text(k(290), k(22), anchor="e", text=alert if len(alert) <= 15 else alert.split()[0],
+                           fill=AMBER, font=self.f(8, "bold"))
         else:
             hi, lo = road.get("high", fc.get("high")), road.get("low", fc.get("low"))
             cv.create_text(k(290), k(22), anchor="e", text=f"H{hi}° L{lo}°", fill=DIM, font=self.f(8, "bold"))
