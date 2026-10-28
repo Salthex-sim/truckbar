@@ -343,6 +343,7 @@ class Bar:
         if self.s["x"] is None:   # first run: centred along the top of the main screen
             self.s["x"] = (self.root.winfo_screenwidth() - w) // 2
         self.root.geometry(f"{w}x{h}+{int(self.s['x'])}+{int(self.s['y'])}")
+        self._placed = (w, h)
         self.root.attributes("-alpha", self.s["alpha"])
 
     def no_focus(self):
@@ -643,6 +644,8 @@ class Bar:
         cv = self.cv
         cv.delete("all")
         w, h = self.size()
+        if (w, h) != getattr(self, "_placed", None):   # a section came or went (the weather pane
+            self.place()                               # appears once the forecast does): resize
         cv.create_rectangle(0, 0, w, self.k(BASE_H), fill=BG, outline=EDGE)   # the bar; below it is see-through
         ctx = {"ats": t.game != 1}
         ctx["sp_mul"], ctx["sp_unit"] = (MPS_TO_MPH, "mph") if ctx["ats"] else (MPS_TO_KMH, "km/h")
