@@ -72,7 +72,7 @@ SECTIONS = [
     ("gauges", "Gauges: oil, air, water, battery, brakes", 412),
     ("job", "Job: destination, distance, time", 280),
     ("weather", "Weather forecast (needs a weather director running)", 300),
-    ("clock", "Clock + rest timer", 110),
+    ("clock", "Clock + rest timer (when fatigue is on)", 110),
 ]
 
 SETTINGS = os.environ.get("TRUCKBAR_SETTINGS") or os.path.join(os.environ.get("APPDATA", "."), "TruckBar", "settings.json")
@@ -953,7 +953,10 @@ class Bar:
         self.badge(x0 + 76, y1, "J" if c["ats"] else "E", GREEN if t.motorBrake else None, 30)
         self.badge(x0 + 112, y1, "DIFF", AMBER if t.differentialLock else None, 40)
         self.badge(x0 + 158, y1, "LIFT", AMBER if t.liftAxleIndicator else None, 40)
-        lvl = min(self.wiper_level, 3) if t.wipers else 0
+        # Lights and wipers only work with the key on, so with it off their boxes stay blank
+        # whatever the switches say.
+        live = t.electricEnabled
+        lvl = min(self.wiper_level, 3) if (t.wipers and live) else 0
         steps_w = int(self.s.get("wiper_speeds", 3))
         names = {1: "INT", 2: "LO", 3: "HI"} if steps_w >= 3 else {1: "LO", 2: "HI"}
         if lvl:
@@ -962,16 +965,16 @@ class Bar:
                        text_color=BG if lvl == 1 else "#ffffff")
         else:
             self.badge(x0 + 204, y1, "WIPE", None, 62)
-        self.badge(x0, y2, "SIDE", GREEN if t.lightsParking else None, 40)
-        self.badge(x0 + 46, y2, "LOW", GREEN if t.lightsBeamLow else None, 40)
+        self.badge(x0, y2, "SIDE", GREEN if (t.lightsParking and live) else None, 40)
+        self.badge(x0 + 46, y2, "LOW", GREEN if (t.lightsBeamLow and live) else None, 40)
         # The telemetry's high beam is the switch: automatic high beams dip the lamps without it
         # changing. So with that option on, label it AUTO (blue = switch on, dim = off).
         if self.watcher and self.watcher.auto_high_beams:
-            self.badge(x0 + 92, y2, "AUTO", BLUE if t.lightsBeamHigh else None, 40)
+            self.badge(x0 + 92, y2, "AUTO", BLUE if (t.lightsBeamHigh and live) else None, 40)
         else:
-            self.badge(x0 + 92, y2, "HIGH", BLUE if t.lightsBeamHigh else None, 40)
-        self.badge(x0 + 138, y2, "BCN", AMBER if t.lightsBeacon else None, 40)
-        self.badge(x0 + 184, y2, "HAZ", AMBER if t.lightsHazard else None, 40)
+            self.badge(x0 + 92, y2, "HIGH", BLUE if (t.lightsBeamHigh and live) else None, 40)
+        self.badge(x0 + 138, y2, "BCN", AMBER if (t.lightsBeacon and live) else None, 40)
+        self.badge(x0 + 184, y2, "HAZ", AMBER if (t.lightsHazard and live) else None, 40)
         if steps:
             for i in range(steps):
                 on = i < ret
@@ -1248,7 +1251,8 @@ class Bar:
                            fill=DIM, font=self.f(9, "bold"))
             cv.create_text(k(55), k(52), text=f"{(h24 % 12) or 12}:{mins:02d}", fill=TXT, font=self.f(16, "bold"))
         rest = t.restStop
-        if rest > 0:
+        # with "Fatigue simulation" off in the game's options there's no rest to take
+        if rest > 0 and (self.watcher is None or self.watcher.fatigue):
             rc = GREEN if rest > 60 else AMBER
             cv.create_text(k(55), k(88), text=f"rest {rest // 60}h{rest % 60:02d}", fill=rc, font=self.f(8))
 

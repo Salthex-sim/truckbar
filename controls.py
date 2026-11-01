@@ -84,17 +84,21 @@ def profile_dir(documents, game):
     return best[1] if best else None
 
 
-def auto_high_beams(documents, game):
-    """Whether "Automatic high beams" is on in the game's options. The game logs the setting
-    when the profile loads and again whenever it changes, so the last mention is current."""
+def game_options(documents, game, names, default):
+    """{name: on?} for on/off options in the game's settings, e.g. g_automatic_high_beams
+    ("Automatic high beams") or g_fatigue ("Fatigue simulation"). The game logs each one when the
+    profile loads and again whenever it changes, so the last mention is current."""
     log = os.path.join(documents, "Euro Truck Simulator 2" if game == 1 else "American Truck Simulator",
                        "game.log.txt")
     try:
         txt = open(log, encoding="utf-8", errors="replace").read()
     except OSError:
-        return False
-    found = re.findall(r'uset g_automatic_high_beams "(\d)"', txt)
-    return bool(found) and found[-1] == "1"
+        return {n: default[n] for n in names}
+    out = {}
+    for n in names:
+        found = re.findall(rf'uset {n} "(\d)"', txt)
+        out[n] = found[-1] == "1" if found else default[n]
+    return out
 
 
 def read_bindings(controls_path):
@@ -143,6 +147,7 @@ class ControlWatcher(threading.Thread):
         self.bindings = {}
         self.summary = "no bindings read yet"
         self.auto_high_beams = False
+        self.fatigue = True                      # until the log says otherwise, show the rest timer
 
     def take(self):
         """Presses since the last call, per action."""
@@ -179,7 +184,9 @@ class ControlWatcher(threading.Thread):
                     self.summary = f"bindings error: {ex}"
                 last_reload = now
             if now - last_auto > 5:             # picks up a change in the game's options
-                self.auto_high_beams = auto_high_beams(self.documents, self.game_getter() or 2)
+                opts = game_options(self.documents, self.game_getter() or 2, ("g_automatic_high_beams", "g_fatigue"),
+                                    {"g_automatic_high_beams": False, "g_fatigue": True})
+                self.auto_high_beams, self.fatigue = opts["g_automatic_high_beams"], opts["g_fatigue"]
                 last_auto = now
             buttons_by_joy = {}
             for action, b in self.bindings.items():
