@@ -8,26 +8,43 @@ and lows with their fronts, city temperatures, weather alerts, your truck and yo
   Right-click      close
 
 Like the bar, it never takes keyboard focus, so the game keeps it.
+
+The picture is drawn with Pillow + numpy (Tk's canvas has no anti-aliasing or transparency):
+the weather is the coarse grid resampled smooth and coloured on a continuous radar scale with
+soft edges; borders, fronts and markers are drawn at twice the size and scaled down. Text
+stays on the Tk canvas, which already draws it smooth.
 """
 import ctypes
+import datetime as dt
 import json
 import math
 import os
 import time
 import tkinter as tk
 
+try:
+    import numpy as np
+    from PIL import Image, ImageDraw, ImageFilter, ImageTk
+except ImportError:                       # the map needs them; the bar itself doesn't
+    np = None
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 WXMAP = os.environ.get("TRUCKBAR_WXMAP") or os.path.join(os.environ.get("APPDATA", "."), "WeatherDirector", "wxmap.json")
 FONT = "Segoe UI"
-OCEAN, LAND, BORDER = "#0f1722", "#1d2530", "#47515f"
+OCEAN, LAND, BORDER, COAST = (14, 21, 31), (31, 38, 49), (78, 88, 102, 150), (96, 108, 124, 220)
 TXT, DIM, AMBER = "#e8e8e8", "#8a8f98", "#ffbf3f"
-RAIN = [(13, "#d23a3a"), (10, "#e8862a"), (7, "#e6c84a"), (4, "#2fa84f"), (1, "#1f6f3a")]   # radar, heavy first
-SNOW = [(9, "#e4edf8"), (5, "#9cbde3"), (1, "#5a7fa8")]
-FOG = "#3d434c"
-COLD, WARM = "#4d9bff", "#ff5a4d"
+# radar: (intensity, colour) stops, coloured continuously between them; intensities are x10
+RAIN_STOPS = [(1.0, (34, 120, 60)), (4.0, (47, 168, 79)), (7.0, (230, 200, 74)), (10.0, (232, 134, 42)),
+              (13.0, (210, 58, 58)), (16.0, (190, 60, 170))]
+SNOW_STOPS = [(1.0, (80, 118, 168)), (5.0, (150, 188, 230)), (9.0, (232, 240, 250))]
+FOG_RGB = (120, 128, 140)
+COLD, WARM = (77, 155, 255), (255, 90, 77)
+LEGEND = [("Rain", "#2fa84f"), ("Heavy", "#e8862a"), ("Storms", "#d23a3a"), ("Snow", "#96bce6"), ("Fog", "#5c636e")]
 ASPECT = 1.62
 PLAY_S, HOLD_S = 0.6, 2.0             # seconds per hour of the loop, pause on the last hour
 WEST, EAST, SOUTH, NORTH = -125.5, -66.0, 24.0, 49.6
+SS = 2                                 # supersampling for lines and shapes
+TOP_PAD, BOT_PAD = 34, 30
 
 
 # Lambert conformal conic, standard parallels 33 and 45 N, centred 39 N 96 W (as the game's own map)
@@ -43,11 +60,55 @@ def lcc(lon, lat):
     return r * math.sin(th), _R0 - r * math.cos(th)
 
 
-def colour(steps, v):
-    for lim, c in steps:
-        if v >= lim:
-            return c
-    return None
+def lcc_inverse(x, y):
+    """numpy arrays of projected x, y -> (lon, lat) in degrees."""
+    ry = _R0 - y
+    r = np.sign(_N) * np.sqrt(x * x + ry * ry)
+    lat = 2 * np.arctan((_F / np.maximum(r, 1e-9)) ** (1 / _N)) - math.pi / 2
+    lon = _L0 + np.arctan2(x, ry) / _N
+    return np.degrees(lon), np.degrees(lat)
+
+
+def ramp(v, stops):
+    """Intensity array -> RGB array, blended between the colour stops."""
+    out = np.zeros(v.shape + (3,), np.float32)
+    xs = [s for s, _ in stops]
+    for ch in range(3):
+        out[..., ch] = np.interp(v, xs, [c[ch] for _, c in stops])
+    return out
+
+
+def catmull(pts, steps=8):
+    """A smooth curve through the points."""
+    if len(pts) < 3:
+        return pts
+    p = [pts[0]] + pts + [pts[-1]]
+    out = []
+    for i in range(1, len(p) - 2):
+        p0, p1, p2, p3 = p[i - 1], p[i], p[i + 1], p[i + 2]
+        for s in range(steps):
+            t = s / steps
+            t2, t3 = t * t, t * t * t
+            out.append(tuple(0.5 * (2 * p1[k] + (-p0[k] + p2[k]) * t + (2 * p0[k] - 5 * p1[k] + 4 * p2[k] - p3[k]) * t2
+                                    + (-p0[k] + 3 * p1[k] - 3 * p2[k] + p3[k]) * t3) for k in range(2)))
+    out.append(pts[-1])
+    return out
+
+
+def along(path, every, offset):
+    """Points (x, y, ux, uy) every `every` pixels along a polyline, starting `offset` in."""
+    out, carry = [], every - offset
+    for (x0, y0), (x1, y1) in zip(path, path[1:]):
+        L = math.hypot(x1 - x0, y1 - y0)
+        if L < 1e-6:
+            continue
+        ux, uy = (x1 - x0) / L, (y1 - y0) / L
+        d = every - carry
+        while d <= L:
+            out.append((x0 + ux * d, y0 + uy * d, ux, uy))
+            d += every
+        carry = (carry + L) % every
+    return out
 
 
 class MapWindow:
@@ -57,7 +118,7 @@ class MapWindow:
         self.top.title("TruckBar weather map")
         self.top.overrideredirect(True)
         self.top.attributes("-topmost", True)
-        self.cv = tk.Canvas(self.top, bg=OCEAN, highlightthickness=1, highlightbackground="#2c3038", bd=0)
+        self.cv = tk.Canvas(self.top, bg="#0e151f", highlightthickness=1, highlightbackground="#2c3038", bd=0)
         self.cv.pack(fill="both", expand=True)
         g = self.s.get("map_geom") or [root.winfo_x(), root.winfo_y() + 200, 1000]
         self.x, self.y, self.w = int(g[0]), int(g[1]), int(g[2])
@@ -66,8 +127,10 @@ class MapWindow:
         self._no_focus()
         self.data, self.mtime, self.checked = None, 0, 0.0
         self.states = json.load(open(os.path.join(HERE, "us_states.json"), encoding="utf-8"))["states"]
-        self.i, self.playing, self.next_at, self.wheel_at = 0, True, 0.0, 0.0
-        self.base_drawn_for = None
+        self.i, self.playing, self.next_at = 0, True, 0.0
+        self.size = None                   # (w, h) the base layers were made for
+        self.cache = {}                    # frame index -> rendered weather picture
+        self.forecast, self.dest_city = None, ""
         self.cv.bind("<ButtonPress-1>", self._press)
         self.cv.bind("<B1-Motion>", self._drag)
         self.cv.bind("<ButtonRelease-1>", self._release)
@@ -106,8 +169,9 @@ class MapWindow:
         if e.state & 0x4:                                 # Ctrl: size
             self.w = max(500, min(2400, self.w + 60 * step))
             self.top.geometry(f"{self.w}x{int(self.w / ASPECT)}")
-            self.base_drawn_for = None
+            self.top.update_idletasks()
             self._remember()
+            self.draw_frame()
         elif self.data:
             self.playing = False
             self.i = (self.i + step) % len(self.data["frames"])
@@ -122,81 +186,148 @@ class MapWindow:
     def _load(self):
         now = time.time()
         if now - self.checked < 3:
-            return
+            return False
         self.checked = now
         try:
             m = os.path.getmtime(WXMAP)
-            if m != self.mtime:
-                with open(WXMAP, encoding="utf-8") as f:
-                    data = json.load(f)
-                self.mtime = m
-                self.data = data if now - data.get("updated", 0) < 6 * 3600 and data.get("frames") else None
-                self.i = min(self.i, len(self.data["frames"]) - 1) if self.data else 0
+            if m == self.mtime:
+                return False
+            with open(WXMAP, encoding="utf-8") as f:
+                data = json.load(f)
+            self.mtime = m
+            self.data = data if now - data.get("updated", 0) < 6 * 3600 and data.get("frames") else None
+            self.i = min(self.i, len(self.data["frames"]) - 1) if self.data else 0
+            self.cache.clear()
+            return True
         except (OSError, ValueError):
             self.data = None
-
-    # -- the half-degree grid ----------------------------------------------------------
-    @staticmethod
-    def _fine_axes(lats, lons):
-        fl = [lats[0] + (lats[1] - lats[0]) * i / 2 for i in range(2 * len(lats) - 1)]
-        fo = [lons[0] + (lons[1] - lons[0]) * i / 2 for i in range(2 * len(lons) - 1)]
-        return fl, fo
-
-    @staticmethod
-    def _fine(flat, lats, lons):
-        """A 1-degree field (row-major) eased onto the half-degree grid (bilinear)."""
-        nlat, nlon = len(lats), len(lons)
-        g = [flat[a * nlon:(a + 1) * nlon] for a in range(nlat)]
-        out = []
-        for i in range(2 * nlat - 1):
-            a0, a1 = i // 2, (i + 1) // 2
-            row = []
-            for j in range(2 * nlon - 1):
-                b0, b1 = j // 2, (j + 1) // 2
-                row.append((g[a0][b0] + g[a0][b1] + g[a1][b0] + g[a1][b1]) / 4)
-            out.append(row)
-        return out
-
-    def _land(self, flats, flons):
-        """Which half-degree points are inside a state (worked out once)."""
-        key = (len(flats), len(flons))
-        if getattr(self, "_land_key", None) == key:
-            return self._land_mask
-        rings = []
-        for st in self.states:
-            for r in st["rings"]:
-                xs, ys = [p[0] for p in r], [p[1] for p in r]
-                rings.append((min(xs), max(xs), min(ys), max(ys), r))
-
-        def inside(lon, lat):
-            for x0, x1, y0, y1, r in rings:
-                if not (x0 <= lon <= x1 and y0 <= lat <= y1):
-                    continue
-                hit = False
-                for (ax, ay), (bx, by) in zip(r, r[1:] + r[:1]):
-                    if (ay > lat) != (by > lat) and lon < ax + (lat - ay) * (bx - ax) / (by - ay):
-                        hit = not hit
-                if hit:
-                    return True
             return False
-
-        self._land_mask = [[inside(lon, lat) for lon in flons] for lat in flats]
-        self._land_key = key
-        return self._land_mask
 
     # -- geometry -----------------------------------------------------------------
     def _fit(self, w, h):
-        xs, ys = zip(*(lcc(lon, lat) for lon in (WEST, -96, EAST) for lat in (SOUTH, NORTH)))
-        xs, ys = list(xs) + [lcc(-96, NORTH + 0.8)[0]], list(ys) + [lcc(-96, NORTH + 0.8)[1]]
-        top_pad, bot_pad = 34, 30
-        k = min((w - 20) / (max(xs) - min(xs)), (h - top_pad - bot_pad) / (max(ys) - min(ys)))
-        cx = (w - k * (max(xs) - min(xs))) / 2 - k * min(xs)
-        cy = top_pad + (h - top_pad - bot_pad - k * (max(ys) - min(ys))) / 2 + k * max(ys)
-        self._k, self._cx, self._cy = k, cx, cy
+        corners = [lcc(lon, lat) for lon in (WEST, -96, EAST) for lat in (SOUTH, NORTH)] + [lcc(-96, NORTH + 0.8)]
+        xs, ys = zip(*corners)
+        k = min((w - 20) / (max(xs) - min(xs)), (h - TOP_PAD - BOT_PAD) / (max(ys) - min(ys)))
+        self._k = k
+        self._cx = (w - k * (max(xs) - min(xs))) / 2 - k * min(xs)
+        self._cy = TOP_PAD + (h - TOP_PAD - BOT_PAD - k * (max(ys) - min(ys))) / 2 + k * max(ys)
 
-    def xy(self, lon, lat):
+    def xy(self, lon, lat, scale=1):
         x, y = lcc(lon, lat)
-        return self._cx + self._k * x, self._cy - self._k * y
+        return (self._cx + self._k * x) * scale, (self._cy - self._k * y) * scale
+
+    def _build_base(self, w, h):
+        """Per window size: the land, the borders on top, a land mask, and where every pixel
+        falls on the weather grid."""
+        self._fit(w, h)
+        big = Image.new("RGB", (w * SS, h * SS), OCEAN)
+        mask = Image.new("L", (w * SS, h * SS), 0)
+        d, dm = ImageDraw.Draw(big), ImageDraw.Draw(mask)
+        rings = [[self.xy(lon, lat, SS) for lon, lat in r] for st in self.states for r in st["rings"]]
+        for r in rings:
+            d.polygon(r, fill=LAND)
+            dm.polygon(r, fill=255)
+        self.base = np.asarray(big.resize((w, h), Image.LANCZOS), np.float32)
+        self.land = np.asarray(mask.resize((w, h), Image.LANCZOS), np.float32) / 255.0
+        lines = Image.new("RGBA", (w * SS, h * SS), (0, 0, 0, 0))
+        dl = ImageDraw.Draw(lines)
+        for r in rings:
+            dl.line(r + r[:1], fill=BORDER, width=SS)
+        self.borders = lines.resize((w, h), Image.LANCZOS)
+        # grid coordinates of every pixel (fractional rows/columns of the weather grid)
+        px, py = np.meshgrid(np.arange(w, dtype=np.float64) + 0.5, np.arange(h, dtype=np.float64) + 0.5)
+        lon, lat = lcc_inverse((px - self._cx) / self._k, (self._cy - py) / self._k)
+        self._lonlat = (lon, lat)
+        self.size = (w, h)
+        self.cache.clear()
+
+    def _sample(self, flat, lats, lons, up=6):
+        """A 1-degree field (row-major, north to south) as a smooth picture-sized array."""
+        nlat, nlon = len(lats), len(lons)
+        # x10 in an 8-bit picture (values run 0..~25), so Pillow can resample and soften it
+        g = np.clip(np.asarray(flat, np.float32).reshape(nlat, nlon) * 10, 0, 255).astype(np.uint8)
+        img = Image.fromarray(g, "L").resize((nlon * up, nlat * up), Image.BICUBIC)
+        img = img.filter(ImageFilter.GaussianBlur(up * 0.35))
+        fine = np.asarray(img, np.float32) / 10
+        lon, lat = self._lonlat
+        # grid point j sits at the centre of fine pixels j*up .. j*up+up-1
+        fx = ((lon - lons[0]) / (lons[1] - lons[0]) + 0.5) * up - 0.5
+        fy = ((lat - lats[0]) / (lats[1] - lats[0]) + 0.5) * up - 0.5
+        # blended between the four nearest fine pixels, so edges don't step
+        x0 = np.clip(np.floor(fx).astype(int), 0, nlon * up - 2)
+        y0 = np.clip(np.floor(fy).astype(int), 0, nlat * up - 2)
+        tx, ty = np.clip(fx - x0, 0, 1), np.clip(fy - y0, 0, 1)
+        out = ((fine[y0, x0] * (1 - tx) + fine[y0, x0 + 1] * tx) * (1 - ty)
+               + (fine[y0 + 1, x0] * (1 - tx) + fine[y0 + 1, x0 + 1] * tx) * ty)
+        # fade out over the last grid cell and a half, so weather doesn't stop in a straight line
+        edge = np.minimum.reduce([fx, nlon * up - 1 - fx, fy, nlat * up - 1 - fy]) / (1.5 * up)
+        return np.maximum(out, 0) * np.clip(edge, 0, 1)
+
+    def _weather_picture(self, f):
+        d = self.data
+        lats, lons = d["lats"], d["lons"]
+        rain, snow, fog = (self._sample(f[k], lats, lons) for k in ("rain", "snow", "fog"))
+        img = self.base.copy()
+        # fog first (land only, soft and see-through), then the precipitation over it
+        a = np.clip((fog - 0.25) / 0.5, 0, 1) * 0.42 * self.land
+        img = img * (1 - a[..., None]) + np.array(FOG_RGB, np.float32) * a[..., None]
+        is_snow = snow >= np.maximum(0.8, rain * 0.5)
+        v = np.where(is_snow, snow, rain)
+        col = np.where(is_snow[..., None], ramp(v, SNOW_STOPS), ramp(v, RAIN_STOPS))
+        a = np.clip((v - 0.9) / 0.7, 0, 1) * 0.86          # a crisp radar-style outer edge
+        img = img * (1 - a[..., None]) + col * a[..., None]
+        pic = Image.fromarray(np.clip(img, 0, 255).astype(np.uint8), "RGB").convert("RGBA")
+        pic.alpha_composite(self.borders)
+        pic.alpha_composite(self._fronts(f.get("fronts", [])))
+        return pic
+
+    def _fronts(self, fronts):
+        w, h = self.size
+        lay = Image.new("RGBA", (w * SS, h * SS), (0, 0, 0, 0))
+        d = ImageDraw.Draw(lay)
+        lw, s = int(3 * SS), 7 * SS
+        for fr in fronts:
+            path = catmull([self.xy(lon, lat, SS) for lon, lat in fr["pts"]])
+            kind = fr["type"]
+            if kind == "stationary":                     # alternating cold and warm, symbols on both sides
+                pieces = along(path, 14 * SS, 0)
+                for n, ((x0, y0, *_), (x1, y1, *_)) in enumerate(zip(pieces, pieces[1:])):
+                    d.line([(x0, y0), (x1, y1)], fill=COLD if n % 2 == 0 else WARM, width=lw)
+                continue
+            col = COLD if kind == "cold" else WARM
+            d.line(path, fill=col, width=lw, joint="curve")
+            for x, y, ux, uy in along(path, 30 * SS, 15 * SS):
+                nx, ny = uy, -ux
+                if (kind == "cold" and nx < 0) or (kind == "warm" and ny > 0):
+                    nx, ny = -nx, -ny                    # cold fronts push east, warm fronts north
+                if kind == "cold":
+                    d.polygon([(x - ux * s, y - uy * s), (x + ux * s, y + uy * s), (x + nx * s * 1.5, y + ny * s * 1.5)], fill=col)
+                else:
+                    ang = math.degrees(math.atan2(ny, nx))
+                    d.pieslice([x - s, y - s, x + s, y + s], ang - 90, ang + 90, fill=col)
+        return lay.resize((w, h), Image.LANCZOS)
+
+    def _sprites(self, k):
+        """The truck and destination markers, anti-aliased."""
+        if getattr(self, "_sprite_k", None) == k:
+            return
+        r = max(6, int(8 * k))
+        n = (2 * r + 4) * SS
+        im = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        c = n / 2
+        d.ellipse([c - r * SS, c - r * SS, c + r * SS, c + r * SS], fill=(255, 255, 255, 255), outline=(0, 0, 0, 255), width=2 * SS)
+        d.ellipse([c - r * SS * 0.4, c - r * SS * 0.4, c + r * SS * 0.4, c + r * SS * 0.4], fill=(0, 0, 0, 255))
+        self._truck_img = ImageTk.PhotoImage(im.resize((n // SS, n // SS), Image.LANCZOS))
+        q = max(5, int(6 * k))
+        n = (2 * q + 4) * SS
+        im = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        c = n / 2
+        d.rounded_rectangle([c - q * SS, c - q * SS, c + q * SS, c + q * SS], radius=2 * SS, fill=(255, 191, 63, 255),
+                            outline=(0, 0, 0, 255), width=SS)
+        self._dest_img = ImageTk.PhotoImage(im.resize((n // SS, n // SS), Image.LANCZOS))
+        self._sprite_k = k
 
     # -- drawing --------------------------------------------------------------------
     def tick(self, forecast, dest_city=""):
@@ -204,158 +335,89 @@ class MapWindow:
         if self.closed:
             return
         self.forecast, self.dest_city = forecast, dest_city
-        old = self.mtime
-        self._load()
+        fresh = self._load()
         now = time.time()
         if self.data and self.playing and now >= self.next_at:
             last = len(self.data["frames"]) - 1
             self.i = 0 if self.i >= last else self.i + 1
             self.next_at = now + (HOLD_S if self.i == last else PLAY_S)
             self.draw_frame()
-        elif self.mtime != old or self.base_drawn_for is None:
+        elif fresh or self.size is None:
             self.draw_frame()
-
-    def draw_base(self, w, h):
-        cv = self.cv
-        cv.delete("all")
-        self._fit(w, h)
-        for st in self.states:
-            for ring in st["rings"]:
-                cv.create_polygon([c for lon, lat in ring for c in self.xy(lon, lat)], fill=LAND, outline="", tags="land")
-        self.base_drawn_for = (w, h)
 
     def draw_frame(self):
         cv = self.cv
         w, h = self.top.winfo_width(), self.top.winfo_height()
-        if self.base_drawn_for != (w, h):
-            self.draw_base(w, h)
-        cv.delete("wx")
-        if not self.data:
-            cv.create_text(w / 2, h / 2, text="No weather map yet - it appears once the weather director\n"
-                                              "is running alongside the game.", fill=DIM, font=(FONT, 12),
-                           justify="center", tags="wx")
+        cv.delete("all")
+        if np is None:
+            cv.create_text(w / 2, h / 2, text="The weather map needs Pillow and numpy:\npip install pillow numpy",
+                           fill=DIM, font=(FONT, 12), justify="center")
             return
-        d, f = self.data, self.data["frames"][self.i]
-        # radar on a half-degree grid, eased between the 1-degree points; fog only over land
-        lats, lons = d["lats"], d["lons"]
-        rain, snow, fog = (self._fine(f[k], lats, lons) for k in ("rain", "snow", "fog"))
-        flats, flons = self._fine_axes(lats, lons)
-        land = self._land(flats, flons)
-        for a, lat in enumerate(flats):
-            for b, lon in enumerate(flons):
-                s_, r_ = snow[a][b], rain[a][b]
-                c = colour(SNOW, s_) if s_ >= max(1, r_ * 0.5) else colour(RAIN, r_)
-                stip = ""
-                if c is None and fog[a][b] >= 0.5 and land[a][b]:
-                    c, stip = FOG, "gray50"
-                if c is None:
-                    continue
-                pts = [self.xy(lon + dx, lat + dy) for dx, dy in ((-.25, -.25), (.25, -.25), (.25, .25), (-.25, .25))]
-                cv.create_polygon([v for p in pts for v in p], fill=c, outline="" if stip else c, stipple=stip, tags="wx")
-        # state lines over the radar
-        for st in self.states:
-            for ring in st["rings"]:
-                cv.create_line([c for lon, lat in ring + ring[:1] for c in self.xy(lon, lat)], fill=BORDER, tags="wx")
-        self._fronts(f.get("fronts", []))
+        if self.size != (w, h):
+            self._build_base(w, h)
+        if not self.data:
+            self._photo = ImageTk.PhotoImage(Image.fromarray(self.base.astype(np.uint8), "RGB"))
+            cv.create_image(0, 0, anchor="nw", image=self._photo)
+            cv.create_text(w / 2, h / 2, text="No weather map yet - it appears once the weather director\n"
+                                              "is running alongside the game.", fill=DIM, font=(FONT, 12), justify="center")
+            return
+        f = self.data["frames"][self.i]
+        if self.i not in self.cache:
+            self.cache[self.i] = ImageTk.PhotoImage(self._weather_picture(f))
+        cv.create_image(0, 0, anchor="nw", image=self.cache[self.i])
         k = max(0.7, min(1.6, w / 1100))
         for p in f.get("highs", []) + f.get("lows", []):
             x, y = self.xy(p["lon"], p["lat"])
-            col = COLD if p["kind"] == "H" else WARM
-            cv.create_text(x, y, text=p["kind"], fill=col, font=(FONT, int(22 * k), "bold"), tags="wx")
-            cv.create_text(x, y + 20 * k, text=str(p["mb"]), fill=col, font=(FONT, int(8 * k)), tags="wx")
-        for c, temp in zip(d["cities"], f.get("temps", [])):
+            col = "#4d9bff" if p["kind"] == "H" else "#ff5a4d"
+            cv.create_text(x, y, text=p["kind"], fill=col, font=(FONT, int(22 * k), "bold"))
+            cv.create_text(x, y + 20 * k, text=str(p["mb"]), fill=col, font=(FONT, int(8 * k)))
+        for c, temp in zip(self.data["cities"], f.get("temps", [])):
             x, y = self.xy(c["lon"], c["lat"])
-            cv.create_oval(x - 2, y - 2, x + 2, y + 2, fill=DIM, outline="", tags="wx")
-            cv.create_text(x + 5, y - 1, anchor="w", text=f"{temp}°", fill=TXT, font=(FONT, int(9 * k), "bold"), tags="wx")
+            cv.create_text(x + 1, y, text="•", fill=DIM, font=(FONT, int(8 * k)))
+            cv.create_text(x + 6, y - 1, anchor="w", text=f"{temp}°", fill=TXT, font=(FONT, int(9 * k), "bold"))
             if w >= 900:
-                cv.create_text(x + 5, y + 11 * k, anchor="w", text=c["name"], fill=DIM, font=(FONT, int(7 * k)), tags="wx")
+                cv.create_text(x + 6, y + 11 * k, anchor="w", text=c["name"], fill=DIM, font=(FONT, int(7 * k)))
         for e in f.get("events", []):
             x, y = self.xy(e["lon"], e["lat"])
-            cv.create_text(x, y, text="⚠ " + e["label"], fill=AMBER, font=(FONT, int(9 * k), "bold"), tags="wx")
+            cv.create_text(x, y, text="⚠ " + e["label"], fill=AMBER, font=(FONT, int(9 * k), "bold"))
         self._truck(k)
-        self._header(w, h, f, k)
-
-    def _fronts(self, fronts):
-        cv = self.cv
-        for fr in fronts:
-            pts = [self.xy(lon, lat) for lon, lat in fr["pts"]]
-            flat = [v for p in pts for v in p]
-            if fr["type"] == "stationary":       # alternating cold and warm pieces (Tk's dashes can't offset)
-                piece, n = 16.0, 0
-                for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
-                    L = math.hypot(x1 - x0, y1 - y0)
-                    m = max(1, int(L // piece))
-                    for q in range(m):
-                        a, b = q / m, (q + 1) / m
-                        cv.create_line(x0 + (x1 - x0) * a, y0 + (y1 - y0) * a, x0 + (x1 - x0) * b, y0 + (y1 - y0) * b,
-                                       fill=COLD if n % 2 == 0 else WARM, width=3, tags="wx")
-                        n += 1
-                continue
-            col = COLD if fr["type"] == "cold" else WARM
-            cv.create_line(flat, fill=col, width=3, smooth=True, tags="wx")
-            # symbols on the side the front is heading for: triangles (cold), half-discs (warm)
-            for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
-                L = math.hypot(x1 - x0, y1 - y0)
-                if L < 1:
-                    continue
-                ux, uy = (x1 - x0) / L, (y1 - y0) / L
-                nx, ny = uy, -ux
-                if (fr["type"] == "cold" and nx < 0) or (fr["type"] == "warm" and ny > 0):
-                    nx, ny = -nx, -ny                    # cold fronts push east, warm fronts north (up)
-                s = 7
-                for m in range(1, int(L // 28) + 1):
-                    mx, my = x0 + ux * (m * 28 - 14), y0 + uy * (m * 28 - 14)
-                    if fr["type"] == "cold":
-                        cv.create_polygon(mx - ux * s, my - uy * s, mx + ux * s, my + uy * s,
-                                          mx + nx * s * 1.4, my + ny * s * 1.4, fill=col, outline=col, tags="wx")
-                    else:                                # a half-disc bulging ahead of the front
-                        ang = math.degrees(math.atan2(-ny, nx))
-                        cv.create_arc(mx - s, my - s, mx + s, my + s, start=ang - 90, extent=180,
-                                      fill=col, outline=col, style="pieslice", tags="wx")
+        self._header(w, h, f)
 
     def _truck(self, k):
         fc = self.forecast or {}
         if "lat" not in fc:
             return
         cv = self.cv
+        self._sprites(k)
         x, y = self.xy(fc["lon"], fc["lat"])
         dest = fc.get("dest")
         if dest:
             dx, dy = self.xy(dest[1], dest[0])
-            cv.create_line(x, y, dx, dy, fill=TXT, width=2, dash=(6, 5), tags="wx")
-            r = 6 * k
-            cv.create_rectangle(dx - r, dy - r, dx + r, dy + r, fill=AMBER, outline="#000000", tags="wx")
-            city = getattr(self, "dest_city", "")
-            if city:
-                cv.create_text(dx, dy - r - 3, anchor="s", text=city, fill=AMBER, font=(FONT, int(9 * k), "bold"), tags="wx")
-        r = 8 * k
-        cv.create_oval(x - r, y - r, x + r, y + r, fill="#ffffff", outline="#000000", width=2, tags="wx")
-        cv.create_oval(x - r / 2.5, y - r / 2.5, x + r / 2.5, y + r / 2.5, fill="#000000", outline="", tags="wx")
+            cv.create_line(x, y, dx, dy, fill=TXT, width=2, dash=(6, 5))
+            cv.create_image(dx, dy, image=self._dest_img)
+            if self.dest_city:
+                cv.create_text(dx, dy - 10 * k, anchor="s", text=self.dest_city, fill=AMBER, font=(FONT, int(9 * k), "bold"))
+        cv.create_image(x, y, image=self._truck_img)
 
-    def _header(self, w, h, f, k):
+    def _header(self, w, h, f):
         cv = self.cv
         hour = f["hour"]
         when = f"{(hour % 12) or 12} {'AM' if hour < 12 else 'PM'}"
-        import datetime as dt
         day = dt.date.fromisoformat(f["date"]).strftime("%a %b %d").replace(" 0", " ")
         ahead = "NOW" if self.i == 0 else f"+{self.i} h"
-        cv.create_rectangle(0, 0, w, 30, fill="#15171b", outline="", tags="wx")
-        cv.create_text(12, 15, anchor="w", text=f"WEATHER  ·  {day}  {when}", fill=TXT, font=(FONT, 11, "bold"), tags="wx")
+        cv.create_rectangle(0, 0, w, 30, fill="#15171b", outline="")
+        cv.create_text(12, 15, anchor="w", text=f"WEATHER  ·  {day}  {when}", fill=TXT, font=(FONT, 11, "bold"))
         cv.create_text(w - 12, 15, anchor="e", text=("▶ " if self.playing else "❚❚ ") + ahead,
-                       fill=AMBER if self.i == 0 else TXT, font=(FONT, 11, "bold"), tags="wx")
-        # hour ticks along the bottom, the shown hour lit
-        n = len(self.data["frames"])
+                       fill=AMBER if self.i == 0 else TXT, font=(FONT, 11, "bold"))
+        n = len(self.data["frames"])                     # hour ticks, the shown hour lit
         x0, x1, yb = 12, w * 0.55, h - 14
         for j in range(n):
             x = x0 + (x1 - x0) * j / max(1, n - 1)
             cv.create_line(x, yb - (7 if j == self.i else 3), x, yb + 3, fill=AMBER if j == self.i else DIM,
-                           width=3 if j == self.i else 1, tags="wx")
-        # legend
-        items = [("Rain", RAIN[3][1]), ("Heavy", RAIN[1][1]), ("Storms", RAIN[0][1]), ("Snow", SNOW[1][1]), ("Fog", FOG)]
+                           width=3 if j == self.i else 1)
         x = w - 12
-        for label, c in reversed(items):
-            tw = len(label) * 7 + 6
-            cv.create_text(x, yb, anchor="e", text=label, fill=DIM, font=(FONT, 8), tags="wx")
-            x -= tw
-            cv.create_rectangle(x - 10, yb - 5, x, yb + 5, fill=c, outline="", tags="wx")
+        for label, c in reversed(LEGEND):
+            cv.create_text(x, yb, anchor="e", text=label, fill=DIM, font=(FONT, 8))
+            x -= len(label) * 7 + 6
+            cv.create_rectangle(x - 10, yb - 5, x, yb + 5, fill=c, outline="")
             x -= 18
