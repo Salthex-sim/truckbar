@@ -273,6 +273,8 @@ class Demo:
             t.cityDst, t.compDst, t.cargo = b"Hamburg", b"Kraftwerk", b"Transformer"
         t.routeDistance, t.routeTime = 1069000, 41 * 3600
         t.time_abs = 4 * 1440 + 14 * 60 + 31   # Fri 14:31
+        # deadline cycles through comfortable / tight / can't make it, 6 s each
+        t.time_abs_delivery = t.time_abs + 41 * 60 + (8 * 60, 30, -45)[int(k / 6) % 3]
         t.restStop = 512
         return t
 
@@ -923,12 +925,44 @@ class Bar:
             cv.create_text(k(right), k(42), anchor="e", text=weight, fill=TXT, font=f_weight)
         dist = t.routeDistance * (M_TO_MI if c["ats"] else 0.001)
         secs = max(0, int(t.routeTime))
-        cv.create_text(k(10), k(72), anchor="w", text=f"{dist:,.0f} {'mi' if c['ats'] else 'km'}",
-                       fill=TXT, font=self.f(14, "bold"))
-        cv.create_text(k(144), k(72), anchor="w", text=f"{secs // 3600}h {secs % 3600 // 60:02d}m",
-                       fill=TXT, font=self.f(14, "bold"))
-        cv.create_text(k(10), k(94), anchor="w", text="ROUTE LEFT", fill=DIM, font=self.f(7))
-        cv.create_text(k(144), k(94), anchor="w", text="TIME LEFT", fill=DIM, font=self.f(7))
+        hm = lambda m: f"{m // 60}h {m % 60:02d}m"
+        due = self.due(t)
+        cells = [(f"{dist:,.0f} {'mi' if c['ats'] else 'km'}", TXT, "ROUTE LEFT", DIM),
+                 (hm(secs // 60), TXT, "TIME LEFT", DIM)]
+        if due:
+            left, colour = due
+            cells.append((hm(abs(left)), colour, "LATE BY" if left < 0 else "DUE IN",
+                          colour if left < 0 else DIM))
+        # spread the columns across the card, shrinking the figures until they fit with a gap
+        for size in (14, 13, 12, 11):
+            big = self.f(size, "bold")
+            widths = [tkfont.Font(font=big).measure(v) for v, *_ in cells]
+            gap = (k(right - 10) - sum(widths)) / max(1, len(cells) - 1)
+            if gap >= k(10):
+                break
+        x = k(10)
+        for (value, colour, label, label_colour), w_px in zip(cells, widths):
+            cv.create_text(x, k(72), anchor="w", text=value, fill=colour, font=big)
+            cv.create_text(x, k(94), anchor="w", text=label, fill=label_colour, font=self.f(7))
+            x += w_px + gap
+
+    @staticmethod
+    def due(t):
+        """(game minutes until the delivery deadline, colour) - or None when the job has no
+        deadline. Green with time to spare; amber when the drive left eats nearly all of it
+        (under an hour, or 15% of the drive, to spare); red once the drive left is longer
+        than the time left, or the deadline has passed."""
+        deadline = t.time_abs_delivery
+        if not deadline or deadline - t.time_abs > 60 * 24 * 60:     # none, or no real limit
+            return None
+        left = int(deadline) - int(t.time_abs)
+        drive = max(0, int(t.routeTime)) // 60
+        spare = left - drive
+        if left < 0 or spare < 0:
+            return left, RED
+        if spare < max(60, drive * 0.15):
+            return left, AMBER
+        return left, GREEN
 
     def s_weather(self, t, c):
         """The road ahead: the sky now, what's coming and when, and conditions on arrival."""
