@@ -4,6 +4,7 @@ Reads the game's live telemetry (see telemetry.py) and draws an instrument
 cluster as one horizontal strip, so nothing covers the mirrors.
 
   Ctrl + Alt + B  open / close the settings window (works while driving)
+  Ctrl + Alt + W  open / close the weather map (needs a weather director - see mapwin.py)
   Drag            move the bar           (only when the mouse is free, e.g. in menus)
   Mouse wheel     bigger / smaller       ( " )
   Ctrl + wheel    more / less see-through
@@ -211,21 +212,27 @@ def gear_name(t, style):
 
 # ------------------------------------------------------------- hotkey -------
 class Hotkey(threading.Thread):
-    """Ctrl+Alt+B anywhere, even while the game has focus. Sets .pressed."""
+    """Ctrl+Alt+B (settings) and Ctrl+Alt+W (weather map) anywhere, even while the game has
+    focus. Sets .pressed / .map_pressed."""
     MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, WM_HOTKEY = 0x1, 0x2, 0x4000, 0x0312
 
     def __init__(self):
         super().__init__(daemon=True)
-        self.pressed = False
+        self.pressed = self.map_pressed = False
         self.ok = False
 
     def run(self):
         u = ctypes.windll.user32
-        self.ok = bool(u.RegisterHotKey(None, 1, self.MOD_CONTROL | self.MOD_ALT | self.MOD_NOREPEAT, ord("B")))
+        mods = self.MOD_CONTROL | self.MOD_ALT | self.MOD_NOREPEAT
+        self.ok = bool(u.RegisterHotKey(None, 1, mods, ord("B")))
+        u.RegisterHotKey(None, 2, mods, ord("W"))
         msg = W.MSG()
         while self.ok and u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
             if msg.message == self.WM_HOTKEY:
-                self.pressed = True
+                if msg.wParam == 2:
+                    self.map_pressed = True
+                else:
+                    self.pressed = True
 
 
 # ------------------------------------------------------------- demo data ----
@@ -288,6 +295,7 @@ class Bar:
         self.seen_game = False
         self.last_game_check = 0.0
         self.win = None                      # the settings window, when open
+        self.map = None                      # the weather map window, when open
         self.hotkey = Hotkey()
         self.hotkey.start()
         # the wiper speed, followed from the player's own controls
@@ -478,6 +486,14 @@ class Bar:
         win.lift()
         win.focus_force()
 
+    def toggle_map(self):
+        if self.map is not None and not self.map.closed:
+            self.map.close()
+            self.map = None
+        else:
+            import mapwin
+            self.map = mapwin.MapWindow(self.root, self.s, save_settings)
+
     def close_settings(self):
         if self.win is not None:
             self.win.destroy()
@@ -503,7 +519,16 @@ class Bar:
             if self.hotkey.pressed:
                 self.hotkey.pressed = False
                 self.toggle_settings()
+            if self.hotkey.map_pressed:
+                self.hotkey.map_pressed = False
+                self.toggle_map()
             t = self.reader.read()
+            if self.map is not None:
+                if self.map.closed:
+                    self.map = None
+                else:
+                    on_job = t is not None and t.sdkActive and t.onJob
+                    self.map.tick(self.forecast(), T.text(t.cityDst) if on_job else "")
             if t is not None and t.plugin_revision and t.plugin_revision != T.PLUGIN_REVISION:
                 self.draw_waiting(f"TruckBar needs scs-telemetry plugin revision {T.PLUGIN_REVISION}, "
                                   f"the game has revision {t.plugin_revision} - see the README")
