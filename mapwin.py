@@ -111,6 +111,60 @@ def along(path, every, offset):
     return out
 
 
+def monitors():
+    """[(label, (x, y, w, h))] for each screen, the main one first, the others named by where
+    they sit relative to it (e.g. 'Above, left')."""
+    import ctypes.wintypes as W
+
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [("cbSize", W.DWORD), ("rcMonitor", W.RECT), ("rcWork", W.RECT), ("dwFlags", W.DWORD)]
+
+    found = []
+    proc = ctypes.WINFUNCTYPE(ctypes.c_int, W.HMONITOR, W.HDC, ctypes.POINTER(W.RECT), W.LPARAM)
+
+    def cb(h, _dc, _r, _l):
+        mi = MONITORINFO()
+        mi.cbSize = ctypes.sizeof(MONITORINFO)
+        ctypes.windll.user32.GetMonitorInfoW(h, ctypes.byref(mi))
+        r = mi.rcWork
+        found.append(((r.left, r.top, r.right - r.left, r.bottom - r.top), bool(mi.dwFlags & 1)))
+        return 1
+
+    ctypes.windll.user32.EnumDisplayMonitors(None, None, proc(cb), 0)
+    main = next((r for r, p in found if p), found[0][0] if found else (0, 0, 1920, 1080))
+    mx, my = main[0] + main[2] / 2, main[1] + main[3] / 2
+    out = []
+    for r, primary in sorted(found, key=lambda f: (not f[1], f[0][1], f[0][0])):
+        if primary:
+            name = "Main screen"
+        else:
+            cx, cy = r[0] + r[2] / 2, r[1] + r[3] / 2
+            v = "Above" if cy < my - main[3] / 2 else ("Below" if cy > my + main[3] / 2 else "")
+            hz = "left" if cx < mx - r[2] / 4 else ("right" if cx > mx + r[2] / 4 else "")
+            name = ", ".join(p for p in (v, hz) if p).capitalize() or "Other screen"
+        out.append((f"{name}  ({r[2]}x{r[3]})", r))
+    return out
+
+
+CORNERS = ["Top left", "Top right", "Centre", "Bottom left", "Bottom right"]
+
+
+def placed(rect, corner, width, margin=20):
+    """(x, y, w) for a map of `width` in a corner of a screen's work area."""
+    x0, y0, sw, sh = rect
+    w = max(500, min(int(width), sw - 2 * margin))
+    h = int(w / ASPECT)
+    if h > sh - 2 * margin:
+        h = sh - 2 * margin
+        w = int(h * ASPECT)
+    xs = {"left": x0 + margin, "right": x0 + sw - w - margin, "mid": x0 + (sw - w) // 2}
+    ys = {"top": y0 + margin, "bottom": y0 + sh - h - margin, "mid": y0 + (sh - h) // 2}
+    if corner == "Centre":
+        return xs["mid"], ys["mid"], w
+    v, hz = corner.lower().split()
+    return xs[hz], ys[v], w
+
+
 class MapWindow:
     def __init__(self, root, settings, save):
         self.s, self.save = settings, save
@@ -176,6 +230,13 @@ class MapWindow:
             self.playing = False
             self.i = (self.i + step) % len(self.data["frames"])
             self.draw_frame()
+
+    def move(self, x, y, w):
+        """Put the map somewhere new (from the settings window)."""
+        self.x, self.y, self.w = int(x), int(y), int(w)
+        self.top.geometry(f"{self.w}x{int(self.w / ASPECT)}+{self.x}+{self.y}")
+        self.top.update_idletasks()
+        self.draw_frame()
 
     def close(self):
         self._remember()

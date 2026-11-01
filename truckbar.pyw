@@ -474,6 +474,8 @@ class Bar:
                        command=lambda: self.set_live("locked", self._lock.get()), **chk).grid(row=row, column=0, columnspan=2, **pad)
         row += 1
 
+        row = self._map_settings(win, row, pad, lab, btn)
+
         foot = tk.Frame(win, bg=BG)
         foot.grid(row=row, column=0, columnspan=2, padx=14, pady=14, sticky="we")
         tk.Button(foot, text="Done - back to the game", command=self.close_settings, **dict(btn, width=24)).pack(side="left")
@@ -485,6 +487,65 @@ class Bar:
         win.geometry(f"+{max(0, x)}+{self.root.winfo_y() + self.root.winfo_height() + 20}")
         win.lift()
         win.focus_force()
+
+    def _map_settings(self, win, row, pad, lab, btn):
+        """Where the weather map opens: a screen, a corner, a size, nudges - all usable while
+        driving (the game hides the mouse, so the map itself can't be dragged then)."""
+        import mapwin
+        s = self.s
+        tk.Label(win, text="Weather map  (Ctrl + Alt + W)", font=(FONT, 12, "bold"), bg=BG, fg=AMBER).grid(
+            row=row, column=0, columnspan=2, padx=14, pady=(12, 4), sticky="w")
+        row += 1
+        screens = mapwin.monitors()
+        names = [n for n, _ in screens]
+        place = s.get("map_place") or [names[0], "Top left"]
+        if place[0] not in names:
+            place[0] = names[0]
+        self._map_screen, self._map_corner = tk.StringVar(value=place[0]), tk.StringVar(value=place[1])
+
+        def apply(*_):
+            rect = dict(screens)[self._map_screen.get()]
+            width = (s.get("map_geom") or [0, 0, 1000])[2]
+            if self._map_size is not None:
+                width = rect[2] * self._map_size.get() / 100
+            x, y, w = mapwin.placed(rect, self._map_corner.get(), width)
+            s["map_place"] = [self._map_screen.get(), self._map_corner.get()]
+            self.set_map_geom(x, y, w)
+
+        self._map_size = None
+        for label, var, opts in (("Screen", self._map_screen, names), ("Corner", self._map_corner, mapwin.CORNERS)):
+            tk.Label(win, text=label, **lab).grid(row=row, column=0, **pad)
+            om = tk.OptionMenu(win, var, *opts, command=apply)
+            om.configure(bg=PANEL, fg=TXT, activebackground=EDGE, activeforeground=TXT, highlightthickness=0,
+                         relief="flat", font=(FONT, 10))
+            om["menu"].configure(bg=PANEL, fg=TXT, font=(FONT, 10))
+            om.grid(row=row, column=1, padx=14, sticky="w")
+            row += 1
+        rect = dict(screens)[self._map_screen.get()]
+        tk.Label(win, text="Size (% of the screen's width)", **lab).grid(row=row, column=0, **pad)
+        self._map_size = tk.Scale(win, from_=25, to=100, orient="horizontal", length=260, bg=BG, fg=TXT,
+                                  highlightthickness=0, troughcolor=PANEL)
+        self._map_size.set(max(25, min(100, round((s.get("map_geom") or [0, 0, 1000])[2] * 100 / rect[2]))))
+        self._map_size.configure(command=apply)
+        self._map_size.grid(row=row, column=1, padx=14, sticky="w")
+        row += 1
+        nud = tk.Frame(win, bg=BG)
+        nud.grid(row=row, column=0, columnspan=2, padx=14, sticky="w")
+        for i, (txt, dx, dy) in enumerate((("◀", -40, 0), ("▲", 0, -20), ("▼", 0, 20), ("▶", 40, 0))):
+            tk.Button(nud, text=txt, command=lambda dx=dx, dy=dy: self.nudge_map(dx, dy), **btn).grid(row=0, column=i, padx=2)
+        tk.Button(nud, text="Open / close the map", command=self.toggle_map, **dict(btn, width=18)).grid(
+            row=0, column=4, padx=(10, 0))
+        return row + 1
+
+    def set_map_geom(self, x, y, w):
+        self.s["map_geom"] = [int(x), int(y), int(w)]
+        save_settings(self.s)
+        if self.map is not None and not self.map.closed:
+            self.map.move(x, y, w)
+
+    def nudge_map(self, dx, dy):
+        x, y, w = self.s.get("map_geom") or [100, 300, 1000]
+        self.set_map_geom(x + dx, y + dy, w)
 
     def toggle_map(self):
         if self.map is not None and not self.map.closed:
