@@ -2,7 +2,7 @@
 separate weather program (wxmap.json) - rain, storms, snow and fog like a TV radar loop, highs
 and lows with their fronts, city temperatures, weather alerts, your truck and your destination.
 
-  Ctrl + Alt + W   open / close (works while driving)
+  Ctrl + Alt + W   open / close (works while driving; change it in TruckBar's settings)
   Drag             move it            Mouse wheel   step through the hours (pauses the loop)
   Click            play / pause       Ctrl + wheel  bigger / smaller
   Right-click      close

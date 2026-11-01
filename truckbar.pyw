@@ -5,6 +5,7 @@ cluster as one horizontal strip, so nothing covers the mirrors.
 
   Ctrl + Alt + B  open / close the settings window (works while driving)
   Ctrl + Alt + W  open / close the weather map (needs a weather director - see mapwin.py)
+                  (both keys can be changed under Keys in the settings window)
   Drag            move the bar           (only when the mouse is free, e.g. in menus)
   Mouse wheel     bigger / smaller       ( " )
   Ctrl + wheel    more / less see-through
@@ -79,7 +80,8 @@ SETTINGS_DIR = os.path.dirname(os.path.abspath(SETTINGS))
 # An optional forecast written by a separate weather program; the section only shows while it exists.
 FORECAST = os.environ.get("TRUCKBAR_FORECAST") or os.path.join(os.environ.get("APPDATA", "."), "WeatherDirector", "forecast.json")
 DEFAULTS = {"x": None, "y": 0, "scale": 1.0, "alpha": 0.85, "locked": False,
-            "gear_names": "auto", "clock_24h": False, "fuel_margin_km": 120, "wiper_speeds": 3, "show": {k: True for k, _, _ in SECTIONS}}
+            "gear_names": "auto", "clock_24h": False, "fuel_margin_km": 120, "wiper_speeds": 3, "show": {k: True for k, _, _ in SECTIONS},
+            "hotkeys": {"settings": "Ctrl+Alt+B", "map": "Ctrl+Alt+W"}}
 
 MPS_TO_MPH, MPS_TO_KMH = 2.23694, 3.6
 M_TO_MI, L_TO_GAL = 0.000621371, 0.264172
@@ -99,9 +101,10 @@ def load_settings():
     try:
         with open(SETTINGS, encoding="utf-8") as f:
             saved = json.load(f)
-        show = saved.pop("show", {})
+        show, keys = saved.pop("show", {}), saved.pop("hotkeys", {})
         s.update(saved)
         s["show"].update(show)
+        s["hotkeys"].update(keys)
     except Exception:
         pass
     return s
@@ -210,29 +213,90 @@ def gear_name(t, style):
     return f"R{-g}" if g < 0 else str(g)
 
 
-# ------------------------------------------------------------- hotkey -------
-class Hotkey(threading.Thread):
-    """Ctrl+Alt+B (settings) and Ctrl+Alt+W (weather map) anywhere, even while the game has
-    focus. Sets .pressed / .map_pressed."""
-    MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, WM_HOTKEY = 0x1, 0x2, 0x4000, 0x0312
+# ------------------------------------------------------------- hotkeys ------
+# The keys that work anywhere, even while the game has focus. Each can be changed in the settings
+# window (click it, press the new keys) - e.g. to something a keypad like the Razer Tartarus sends.
+HOTKEYS = [("settings", "Settings window"), ("map", "Weather map")]     # defaults in DEFAULTS
+MODS = [("Ctrl", 0x2), ("Alt", 0x1), ("Shift", 0x4), ("Win", 0x8)]
+KEY_NAMES = {**{chr(c): c for c in range(0x30, 0x3A)}, **{chr(c): c for c in range(0x41, 0x5B)},
+             **{f"F{n}": 0x6F + n for n in range(1, 25)}, **{f"Num{n}": 0x60 + n for n in range(10)},
+             "Num*": 0x6A, "Num+": 0x6B, "Num-": 0x6D, "Num.": 0x6E, "Num/": 0x6F,
+             "Space": 0x20, "PageUp": 0x21, "PageDown": 0x22, "End": 0x23, "Home": 0x24,
+             "Left": 0x25, "Up": 0x26, "Right": 0x27, "Down": 0x28, "Insert": 0x2D, "Delete": 0x2E,
+             "Backspace": 0x08, "Tab": 0x09, "Enter": 0x0D, "Pause": 0x13, "ScrollLock": 0x91,
+             ";": 0xBA, "=": 0xBB, ",": 0xBC, "-": 0xBD, ".": 0xBE, "/": 0xBF, "`": 0xC0,
+             "[": 0xDB, "\\": 0xDC, "]": 0xDD, "'": 0xDE}
+VK_NAMES = {v: k for k, v in KEY_NAMES.items()}
+MODIFIER_VKS = {0x10, 0x11, 0x12, 0x5B, 0x5C, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5}
 
-    def __init__(self):
+
+def combo_text(mods, vk):
+    """(0x3, 0x42) -> 'Ctrl+Alt+B'."""
+    return "+".join([n for n, m in MODS if mods & m] + [VK_NAMES.get(vk, f"Key{vk}")])
+
+
+def parse_combo(text):
+    """'Ctrl+Alt+B' -> (mods, vk), or None if it can't be read."""
+    *mods, key = text.split("+")
+    bits = dict(MODS)
+    if any(m not in bits for m in mods):
+        return None
+    vk = KEY_NAMES.get(key) or (int(key[3:]) if key.startswith("Key") and key[3:].isdigit() else None)
+    return (sum(bits[m] for m in mods), vk) if vk else None
+
+
+def bare_key_ok(vk):
+    """A key with no Ctrl/Alt/Shift/Win would be taken from every program, so only allow keys
+    nothing types with: F13-F24 (the extra keys macro pads can send) and Pause / Scroll Lock."""
+    return 0x7C <= vk <= 0x87 or vk in (0x13, 0x91)
+
+
+class Hotkey(threading.Thread):
+    """Registers the HOTKEYS combos anywhere in Windows and sets .pressed[name] when one fires.
+    Call bind() from any thread to change them; it answers which ones Windows refused (another
+    program already owns that combination)."""
+    MOD_NOREPEAT, WM_HOTKEY, WM_APP = 0x4000, 0x0312, 0x8000
+
+    def __init__(self, keys):
         super().__init__(daemon=True)
-        self.pressed = self.map_pressed = False
-        self.ok = False
+        self.pressed = {name: False for name, _ in HOTKEYS}
+        self.failed = set()
+        self._want, self._done, self._ready = dict(keys), threading.Event(), threading.Event()
+        self.tid = None
+
+    def _register(self):
+        u = ctypes.windll.user32
+        for i in range(len(HOTKEYS)):
+            u.UnregisterHotKey(None, i + 1)
+        failed = set()
+        for i, (name, _) in enumerate(HOTKEYS):
+            combo = parse_combo(self._want.get(name) or "")
+            if combo and not u.RegisterHotKey(None, i + 1, combo[0] | self.MOD_NOREPEAT, combo[1]):
+                failed.add(name)
+        self.failed = failed
 
     def run(self):
         u = ctypes.windll.user32
-        mods = self.MOD_CONTROL | self.MOD_ALT | self.MOD_NOREPEAT
-        self.ok = bool(u.RegisterHotKey(None, 1, mods, ord("B")))
-        u.RegisterHotKey(None, 2, mods, ord("W"))
         msg = W.MSG()
-        while self.ok and u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-            if msg.message == self.WM_HOTKEY:
-                if msg.wParam == 2:
-                    self.map_pressed = True
-                else:
-                    self.pressed = True
+        u.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0)       # give this thread a message queue
+        self.tid = ctypes.windll.kernel32.GetCurrentThreadId()
+        self._register()
+        self._ready.set()
+        while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            if msg.message == self.WM_HOTKEY and 1 <= msg.wParam <= len(HOTKEYS):
+                self.pressed[HOTKEYS[msg.wParam - 1][0]] = True
+            elif msg.message == self.WM_APP:
+                self._register()
+                self._done.set()
+
+    def bind(self, keys):
+        """keys: {name: 'Ctrl+Alt+B' or ''}. Returns the names Windows refused."""
+        self._ready.wait(2)
+        self._want = dict(keys)
+        self._done.clear()
+        ctypes.windll.user32.PostThreadMessageW(self.tid, self.WM_APP, 0, 0)
+        self._done.wait(2)
+        return set(self.failed)
 
 
 # ------------------------------------------------------------- demo data ----
@@ -296,7 +360,7 @@ class Bar:
         self.last_game_check = 0.0
         self.win = None                      # the settings window, when open
         self.map = None                      # the weather map window, when open
-        self.hotkey = Hotkey()
+        self.hotkey = Hotkey(self.s["hotkeys"])
         self.hotkey.start()
         # the wiper speed, followed from the player's own controls
         self.game_id = None
@@ -474,13 +538,16 @@ class Bar:
                        command=lambda: self.set_live("locked", self._lock.get()), **chk).grid(row=row, column=0, columnspan=2, **pad)
         row += 1
 
-        row = self._map_settings(win, row, pad, lab, btn)
+        # weather map and keys in a second column, so the window fits a 1440-high screen
+        right = self._map_settings(win, 0, pad, lab, btn, c=2)
+        right = self._key_settings(win, right, pad, lab, btn, c=2)
+        row = max(row, right)
 
         foot = tk.Frame(win, bg=BG)
-        foot.grid(row=row, column=0, columnspan=2, padx=14, pady=14, sticky="we")
+        foot.grid(row=row, column=0, columnspan=4, padx=14, pady=14, sticky="we")
         tk.Button(foot, text="Done - back to the game", command=self.close_settings, **dict(btn, width=24)).pack(side="left")
         tk.Button(foot, text="Quit TruckBar", command=self.root.destroy, **dict(btn, width=12)).pack(side="right")
-        tk.Label(win, text="Ctrl + Alt + B opens and closes this window", bg=BG, fg=DIM, font=(FONT, 9)).grid(row=row + 1, column=0, columnspan=2, padx=14, pady=(0, 10), sticky="w")
+        tk.Label(win, text=f"{self.key('settings')} opens and closes this window", bg=BG, fg=DIM, font=(FONT, 9)).grid(row=row + 1, column=0, columnspan=4, padx=14, pady=(0, 10), sticky="w")
 
         win.update_idletasks()
         x = self.root.winfo_x() + (self.root.winfo_width() - win.winfo_width()) // 2
@@ -488,13 +555,13 @@ class Bar:
         win.lift()
         win.focus_force()
 
-    def _map_settings(self, win, row, pad, lab, btn):
+    def _map_settings(self, win, row, pad, lab, btn, c=0):
         """Where the weather map opens: a screen, a corner, a size, nudges - all usable while
         driving (the game hides the mouse, so the map itself can't be dragged then)."""
         import mapwin
         s = self.s
-        tk.Label(win, text="Weather map  (Ctrl + Alt + W)", font=(FONT, 12, "bold"), bg=BG, fg=AMBER).grid(
-            row=row, column=0, columnspan=2, padx=14, pady=(12, 4), sticky="w")
+        tk.Label(win, text="Weather map", font=(FONT, 12, "bold"), bg=BG, fg=AMBER).grid(
+            row=row, column=c, columnspan=2, padx=14, pady=(12, 4), sticky="w")
         row += 1
         screens = mapwin.monitors()
         names = [n for n, _ in screens]
@@ -514,28 +581,102 @@ class Bar:
 
         self._map_size = None
         for label, var, opts in (("Screen", self._map_screen, names), ("Corner", self._map_corner, mapwin.CORNERS)):
-            tk.Label(win, text=label, **lab).grid(row=row, column=0, **pad)
+            tk.Label(win, text=label, **lab).grid(row=row, column=c, **pad)
             om = tk.OptionMenu(win, var, *opts, command=apply)
             om.configure(bg=PANEL, fg=TXT, activebackground=EDGE, activeforeground=TXT, highlightthickness=0,
                          relief="flat", font=(FONT, 10))
             om["menu"].configure(bg=PANEL, fg=TXT, font=(FONT, 10))
-            om.grid(row=row, column=1, padx=14, sticky="w")
+            om.grid(row=row, column=c + 1, padx=14, sticky="w")
             row += 1
         rect = dict(screens)[self._map_screen.get()]
-        tk.Label(win, text="Size (% of the screen's width)", **lab).grid(row=row, column=0, **pad)
+        tk.Label(win, text="Size (% of the screen's width)", **lab).grid(row=row, column=c, **pad)
         self._map_size = tk.Scale(win, from_=25, to=100, orient="horizontal", length=260, bg=BG, fg=TXT,
                                   highlightthickness=0, troughcolor=PANEL)
         self._map_size.set(max(25, min(100, round((s.get("map_geom") or [0, 0, 1000])[2] * 100 / rect[2]))))
         self._map_size.configure(command=apply)
-        self._map_size.grid(row=row, column=1, padx=14, sticky="w")
+        self._map_size.grid(row=row, column=c + 1, padx=14, sticky="w")
         row += 1
         nud = tk.Frame(win, bg=BG)
-        nud.grid(row=row, column=0, columnspan=2, padx=14, sticky="w")
+        nud.grid(row=row, column=c, columnspan=2, padx=14, sticky="w")
         for i, (txt, dx, dy) in enumerate((("◀", -40, 0), ("▲", 0, -20), ("▼", 0, 20), ("▶", 40, 0))):
             tk.Button(nud, text=txt, command=lambda dx=dx, dy=dy: self.nudge_map(dx, dy), **btn).grid(row=0, column=i, padx=2)
         tk.Button(nud, text="Open / close the map", command=self.toggle_map, **dict(btn, width=18)).grid(
             row=0, column=4, padx=(10, 0))
         return row + 1
+
+    def key(self, name):
+        """The key for a hotkey as people read it: 'Ctrl + Alt + B'."""
+        return (self.s["hotkeys"].get(name) or "not set").replace("+", " + ")
+
+    def _key_settings(self, win, row, pad, lab, btn, c=0):
+        """The hotkeys: click one, press the new keys (Esc cancels). They work anywhere, so a
+        combination is needed - Ctrl, Alt, Shift or Win plus a key - except for F13-F24, Pause
+        and Scroll Lock, which nothing types with and macro pads can send on their own."""
+        tk.Label(win, text="Keys (work while driving)", font=(FONT, 12, "bold"), bg=BG, fg=AMBER).grid(
+            row=row, column=c, columnspan=2, padx=14, pady=(12, 4), sticky="w")
+        row += 1
+        self._key_btns = {}
+        for name, label in HOTKEYS:
+            tk.Label(win, text=label, **lab).grid(row=row, column=c, **pad)
+            b = tk.Button(win, text=self.key(name), command=lambda n=name: self.capture_key(n), **dict(btn, width=22))
+            b.grid(row=row, column=c + 1, padx=14, pady=2, sticky="w")
+            self._key_btns[name] = b
+            row += 1
+        self._key_note = tk.Label(win, text=self._taken_note(self.hotkey.failed), bg=BG, fg=DIM,
+                                  font=(FONT, 9), justify="left", wraplength=420)
+        self._key_note.grid(row=row, column=c, columnspan=2, padx=14, sticky="w")
+        return row + 1
+
+    def _taken_note(self, failed):
+        if failed:
+            names = " and ".join(self.key(n) for n, _ in HOTKEYS if n in failed)
+            return f"{names}: another program already uses that - pick something else."
+        return "Click a key, then press the new combination. Esc cancels."
+
+    def capture_key(self, name):
+        """Wait for the next key combination pressed in the settings window and bind it."""
+        win, b = self.win, self._key_btns[name]
+        self.hotkey.bind({})                     # so pressing the current combo doesn't fire it
+        b.configure(text="Press the keys…", fg=AMBER)
+        self._key_note.configure(text="Ctrl, Alt, Shift or Win plus a key. F13-F24, Pause and Scroll Lock "
+                                      "work on their own. Esc cancels.")
+        down = ctypes.windll.user32.GetAsyncKeyState
+
+        def finish(text=None):
+            win.unbind("<KeyPress>")
+            if text:
+                old = self.s["hotkeys"].get(name)
+                self.s["hotkeys"][name] = text
+                failed = self.hotkey.bind(self.s["hotkeys"])
+                if name in failed:                # taken: keep the old one
+                    self.s["hotkeys"][name] = old
+                    self.hotkey.bind(self.s["hotkeys"])
+                    self._key_note.configure(text=f"{text.replace('+', ' + ')} is already used by another "
+                                                  "program - kept the old key.")
+                else:
+                    save_settings(self.s)
+                    self._key_note.configure(text=self._taken_note(failed))
+            else:
+                self._key_note.configure(text=self._taken_note(self.hotkey.bind(self.s["hotkeys"])))
+            b.configure(text=self.key(name), fg=TXT)
+
+        def on_key(e):
+            vk = e.keycode
+            if vk in MODIFIER_VKS:
+                return "break"
+            mods = sum(m for (_, m), keys in zip(MODS, ((0x11,), (0x12,), (0x10,), (0x5B, 0x5C)))
+                       if any(down(k) & 0x8000 for k in keys))
+            if vk == 0x1B and not mods:
+                finish()
+            elif mods or bare_key_ok(vk):
+                finish(combo_text(mods, vk))
+            else:
+                self._key_note.configure(text=f"{combo_text(0, vk)} on its own would stop it typing everywhere - "
+                                              "hold Ctrl, Alt, Shift or Win with it.")
+            return "break"
+
+        win.bind("<KeyPress>", on_key)
+        win.focus_force()
 
     def set_map_geom(self, x, y, w):
         self.s["map_geom"] = [int(x), int(y), int(w)]
@@ -577,11 +718,11 @@ class Bar:
     # -- main loop --------------------------------------------------------------
     def tick(self):
         try:
-            if self.hotkey.pressed:
-                self.hotkey.pressed = False
+            if self.hotkey.pressed["settings"]:
+                self.hotkey.pressed["settings"] = False
                 self.toggle_settings()
-            if self.hotkey.map_pressed:
-                self.hotkey.map_pressed = False
+            if self.hotkey.pressed["map"]:
+                self.hotkey.pressed["map"] = False
                 self.toggle_map()
             t = self.reader.read()
             if self.map is not None:
@@ -726,7 +867,7 @@ class Bar:
         bh = self.k(BASE_H)
         cv.create_rectangle(0, 0, w, bh, fill=BG, outline=EDGE)
         cv.create_text(w / 2, bh / 2, fill=AMBER if message else DIM, font=self.f(12),
-                       text=message or "TruckBar - waiting for ATS / ETS2 to start…   (Ctrl+Alt+B for settings)")
+                       text=message or f"TruckBar - waiting for ATS / ETS2 to start…   ({self.key('settings')} for settings)")
 
     def draw(self, t):
         cv = self.cv

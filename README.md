@@ -182,11 +182,13 @@ If it's started before the game, it waits.
 
 ## Controls
 
-Once you're driving, the game holds the mouse, so TruckBar is controlled by a hotkey.
+Once you're driving, the game holds the mouse, so TruckBar is controlled by hotkeys.
+Both can be changed under **Keys** in the settings window.
 
 | Input | What it does |
 |---|---|
 | **Ctrl + Alt + B** | Open or close the **settings window**. Works even while the game has focus. |
+| **Ctrl + Alt + W** | Open or close the **weather map** (needs a weather director). |
 | Drag the bar | Move it (only when the mouse is free, e.g. in the game's menus) |
 | Mouse wheel on the bar | Bigger or smaller |
 | Ctrl + mouse wheel | More or less see-through |
@@ -207,6 +209,11 @@ Once you're driving, the game holds the mouse, so TruckBar is controlled by a ho
 - **24-hour clock:** off gives 12-hour with AM/PM.
 - **Position:** arrow buttons nudge the bar. **Centre along top** puts it back.
 - **Lock position:** stops accidental dragging.
+- **Weather map:** which screen and corner it opens in, its size, and arrow buttons to fine-tune.
+- **Keys:** click a hotkey, then press the new combination (Esc cancels). It needs Ctrl, Alt,
+  Shift or Win plus a key, because it works in every program. F13–F24, Pause and Scroll Lock
+  work on their own, which suits macro pads that can send them. If another program already
+  uses the combination, TruckBar says so and keeps the old key.
 - **Quit TruckBar.**
 
 Everything is saved as you change it, in `%APPDATA%\TruckBar\settings.json`.
@@ -226,8 +233,9 @@ what TruckBar reads, so TruckBar refuses rather than showing wrong numbers. Inst
 release `V.1.12.1` of RenCloud's plugin.
 
 **Ctrl + Alt + B does nothing.**
-Another program has claimed that hotkey. Close it, or open settings by right-clicking the bar
-from the game's menu, where the mouse is free.
+Another program has claimed that hotkey. Open settings by right-clicking the bar from the
+game's menu, where the mouse is free, and pick a different key under **Keys**. The settings
+window lists any key that another program has taken.
 
 **The bar is hidden behind the game.**
 Run the game in **borderless** or **windowed** mode. Exclusive fullscreen draws over every
