@@ -12,6 +12,8 @@ warnings, fuel and your job at a glance, and nothing covers your mirrors.
 - **Never takes keyboard focus.** Per-game profiles in Razer Synapse, Logitech G HUB and
   similar tools stay on the game.
 - Adjustable opacity and size, and every section can be shown or hidden.
+- Optional **weather map** that pops out on any screen, if you run a weather program alongside it.
+- Hotkeys you can change, including to a macro-pad key. See [Customizing](docs/CUSTOMIZING.md).
 - Works with single screens, ultrawides and triple-screen setups.
 
 ---
@@ -24,14 +26,14 @@ From left to right. Every section can be switched off.
 |---|---|
 | **Signals** | Left/right turn signals and the posted speed limit (US sign in ATS, EU roundel in ETS2) |
 | **Speed** | Big speedometer, tachometer, gear, cruise set speed. This panel hangs slightly below the bar. |
-| **Status lights** | Park brake, retarder (with its current step), engine/Jake brake, diff lock, lift axle, **wiper speed**, side/low/high beams (with **automatic high beams**), beacon, hazards, plus a row of pips counting retarder steps |
+| **Status lights** | Park brake, retarder (with its current step), engine/Jake brake, diff lock, lift axle, **wiper speed**, side/low/high beams (with **automatic high beams**), beacon, hazards, plus a row of pips counting retarder steps. Lights and wipers stay blank with the key off. |
 | **Warnings** | Low air, emergency brake, oil pressure, coolant temperature, low fuel, low DEF/AdBlue, battery |
 | **Compass** | A scrolling compass tape with the direction you're facing under the centre mark, plus the 16-point heading and degrees (e.g. `ENE 068°`) |
 | **Fuel** | Fuel gauge with reserve zone, DEF/AdBlue level, air pressure, average economy, and **range / fuel stop**: whether your fuel covers the rest of the job, or how far you can go before you need to stop |
 | **Gauges** | Oil pressure, oil temperature, coolant temperature, battery voltage, brake temperature |
-| **Job** | Destination, cargo and its weight, distance and time left |
+| **Job** | Destination, cargo and its weight, route distance and drive time left, and time until the delivery deadline (see [Delivery deadline](#delivery-deadline)) |
 | **Weather** *(optional)* | The weather now, what's coming next and conditions at your destination, when a weather program provides a forecast (see [Weather pane](#weather-pane)) |
-| **Clock** | In-game day and time (12- or 24-hour) and time until you need to rest |
+| **Clock** | In-game day and time (12- or 24-hour), and time until you need to rest when *Fatigue simulation* is on in the game's options |
 
 ### Reading the speedometer
 
@@ -81,6 +83,19 @@ bindings you use, and doesn't need focus. Presses while the game is paused are i
 the game ignores them. Turning the wipers off resets the speed. Trucks with only two wiper
 speeds: set **Wiper speeds** to 2 in Settings.
 
+### Delivery deadline
+
+**DUE IN** counts down to the job's deadline in game time. Its colour compares that with the
+drive time the game's route advisor gives for what's left:
+
+| Colour | Meaning |
+|---|---|
+| Green | Time to spare |
+| Amber | The drive will use nearly all of it: under an hour, or 15% of the drive, to spare |
+| Red | The drive left is longer than the time left. Once the deadline passes it reads **LATE BY**. |
+
+Jobs with no deadline, and deadlines more than 60 days away, show no countdown.
+
 ### Gear names
 
 TruckBar names gears the same way your in-game dash does, using the **H-shifter layout**
@@ -110,6 +125,38 @@ At Denver: Rain, 42°
 
 The pane can be switched off like any other section in Settings.
 
+### Weather map
+
+![The weather map: radar, fronts, highs and lows, city temperatures, the truck and its destination](docs/weather-map.png)
+
+Press **Ctrl + Alt + W** to pop out a national map of the next 24 game hours, looping like a TV
+radar. It shows:
+
+- rain, storms, snow and fog
+- highs, lows and their fronts
+- city temperatures and weather alerts
+- your truck, with a dashed line to your destination
+
+Like the bar, it never takes focus from the game.
+
+Choose where it opens under **Weather map** in Settings: the screen, the corner, and the size.
+Arrow buttons fine-tune it. It reopens there every time, so you set it once. When the mouse is
+free (in the game's menus, or with the game in the background) you can also use it on the map:
+
+| Input | What it does |
+|---|---|
+| Click | Play / pause the loop |
+| Mouse wheel | Step through the hours |
+| Ctrl + mouse wheel | Bigger / smaller |
+| Drag | Move it |
+| Right-click | Close |
+
+Like the weather pane, the map draws what a separate weather program writes, here
+`%APPDATA%\WeatherDirector\wxmap.json`. Without one it says it has no weather yet. The file
+format is in [Customizing](docs/CUSTOMIZING.md#6-feeding-it-your-own-weather), if you want to
+feed it from your own program. The map also needs Pillow and numpy (see
+[Requirements](#requirements)).
+
 ### Units
 
 TruckBar picks the units from the game:
@@ -128,8 +175,9 @@ TruckBar picks the units from the game:
 
 - **Windows 10 or 11**
 - **Python 3.10 or newer** from [python.org](https://www.python.org/downloads/windows/).
-  Keep **tcl/tk and IDLE** ticked in the installer; it's on by default. TruckBar uses only the
+  Keep **tcl/tk and IDLE** ticked in the installer; it's on by default. The bar uses only the
   standard library, so there is nothing else to install.
+- **For the weather map only:** Pillow and numpy, `pip install pillow numpy`.
 - **The scs-telemetry plugin, revision 12**, from
   [RenCloud/scs-sdk-plugin](https://github.com/RenCloud/scs-sdk-plugin/releases) (release
   `V.1.12.1`). This is the same plugin many dashboards and companion apps use, so you may
@@ -218,6 +266,10 @@ Both can be changed under **Keys** in the settings window.
 
 Everything is saved as you change it, in `%APPDATA%\TruckBar\settings.json`.
 Delete that file to go back to the defaults.
+
+**[Customizing TruckBar](docs/CUSTOMIZING.md)** goes further: every value in that file, hotkeys
+on macro pads, starting it with the game, changing colours and tach bands, and feeding it your
+own weather.
 
 ---
 
