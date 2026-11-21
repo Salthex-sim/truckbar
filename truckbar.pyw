@@ -75,13 +75,42 @@ SECTIONS = [
     ("clock", "Clock + rest timer (when fatigue is on)", 110),
 ]
 
+# The split: sections up to this one sit left of a gap in the middle of the screen, the rest right
+# of it, so the game's own notices (a 480 px wide box centred along the top at 1440 px high, e.g.
+# "Fuel tank is full!") are never hidden behind the bar.
+SPLIT_AFTER = "warnings"
+
 SETTINGS = os.environ.get("TRUCKBAR_SETTINGS") or os.path.join(os.environ.get("APPDATA", "."), "TruckBar", "settings.json")
 SETTINGS_DIR = os.path.dirname(os.path.abspath(SETTINGS))
 # An optional forecast written by a separate weather program; the section only shows while it exists.
 FORECAST = os.environ.get("TRUCKBAR_FORECAST") or os.path.join(os.environ.get("APPDATA", "."), "WeatherDirector", "forecast.json")
+# The weather program's own settings: the dial below writes {"dial": 1-10} there. Shown only if it exists.
+WEATHER_SETTINGS = os.path.join(os.path.dirname(FORECAST), "settings.json")
+# ... and its progress on a new dial setting: waiting (for the title screen) / building / ready / failed
+DIAL_STATUS = os.path.join(os.path.dirname(FORECAST), "dial_status.json")
+DIAL_STEPS = {
+    "waiting": ("New weather: go to the title screen", AMBER),
+    "building": ("Building new weather… please wait", RED),
+    "ready": ("New weather ready - load your save", GREEN),
+    "failed": ("Too soon - back to the title screen", AMBER),
+}
+DIAL_WORDS = {
+    1: "Real weather - today's actual forecast (uses the internet)",
+    2: "Realistic - normal weather for the time of year",
+    3: "A little off course - a few more wet days",
+    4: "Unsettled - more rain, more storms",
+    5: "Lively - and now and then a storm sent your way",
+    6: "Stormy spells - storms sent your way more often",
+    7: "Wild - storms can come a month early or late",
+    8: "Rough - strong storms, sharp cold fronts",
+    9: "Severe - up to two storms sent your way at once",
+    10: "Mother Nature's worst - something nasty every session",
+}
 DEFAULTS = {"x": None, "y": 0, "scale": 1.0, "alpha": 0.85, "locked": False,
             "gear_names": "auto", "clock_24h": False, "fuel_margin_km": 120, "wiper_speeds": 3, "show": {k: True for k, _, _ in SECTIONS},
-            "hotkeys": {"settings": "Ctrl+Alt+B", "map": "Ctrl+Alt+W"}}
+            "hotkeys": {"settings": "Ctrl+Alt+B", "map": "Ctrl+Alt+W"},
+            "split": True, "split_gap": 540, "auto_hide": True, "limit_flash": True}
+LIMIT_FLASHES, LIMIT_FLASH_PERIOD = 4, 0.5   # the sign blinks 4 times, half a second each, on a new limit
 
 MPS_TO_MPH, MPS_TO_KMH = 2.23694, 3.6
 M_TO_MI, L_TO_GAL = 0.000621371, 0.264172
@@ -134,6 +163,24 @@ def focus_game():
         if h:
             u.SetForegroundWindow(h)
             return
+
+
+def work_area(x, y):
+    """(left, top, right, bottom) of the usable part of the screen holding point x, y."""
+    from ctypes import wintypes as W
+
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [("cbSize", W.DWORD), ("rcMonitor", W.RECT), ("rcWork", W.RECT), ("dwFlags", W.DWORD)]
+
+    u = ctypes.windll.user32
+    u.MonitorFromPoint.restype = W.HMONITOR
+    u.MonitorFromPoint.argtypes = [W.POINT, W.DWORD]
+    mi = MONITORINFO()
+    mi.cbSize = ctypes.sizeof(MONITORINFO)
+    if u.GetMonitorInfoW(u.MonitorFromPoint(W.POINT(int(x), int(y)), 2), ctypes.byref(mi)):   # 2 = nearest
+        r = mi.rcWork
+        return r.left, r.top, r.right, r.bottom
+    return 0, 0, u.GetSystemMetrics(0), u.GetSystemMetrics(1)
 
 
 def documents_folder():
@@ -377,21 +424,53 @@ class Bar:
         self.root.attributes("-transparentcolor", KEY)   # the gap beside the dropped panel
         self.cv = tk.Canvas(self.root, bg=KEY, highlightthickness=0, bd=0)
         self.cv.pack(fill="both", expand=True)
+        # Two layers, so text never fades: the panels are painted on a translucent backing window
+        # (the Opacity setting) just below this one, and this window is fully opaque with the panel
+        # areas cut out in KEY. Fading the whole window (the old way) faded the text with it, which
+        # made it unreadable against a bright sky.
+        self.back = tk.Toplevel(self.root)
+        self.back.overrideredirect(True)
+        self.back.attributes("-topmost", True)
+        self.back.configure(bg=KEY)
+        self.back.attributes("-transparentcolor", KEY)
+        self.bcv = tk.Canvas(self.back, bg=KEY, highlightthickness=0, bd=0)
+        self.bcv.pack(fill="both", expand=True)
+        self._backdrop = None
         self.place()
         self.root.update_idletasks()
-        self.no_focus()
+        self.no_focus(self.root)
+        self.no_focus(self.back)
 
-        self.cv.bind("<ButtonPress-1>", self.drag_start)
-        self.cv.bind("<B1-Motion>", self.drag_move)
-        self.cv.bind("<ButtonRelease-1>", lambda e: save_settings(self.s))
-        self.cv.bind("<MouseWheel>", self.wheel)
-        self.cv.bind("<Button-3>", lambda e: self.toggle_settings())
+        for c in (self.cv, self.bcv):   # clicks on the cut-out areas land on the backing window
+            c.bind("<ButtonPress-1>", self.drag_start)
+            c.bind("<B1-Motion>", self.drag_move)
+            c.bind("<ButtonRelease-1>", lambda e: save_settings(self.s))
+            c.bind("<MouseWheel>", self.wheel)
+            c.bind("<Button-3>", lambda e: self.toggle_settings())
         self.tick()
 
     # -- window plumbing ------------------------------------------------------
     def shown(self):
         return [(k, w) for k, _, w in SECTIONS if self.s["show"].get(k, True)
                 and (k != "weather" or self.forecast() is not None)]
+
+    def dial_progress(self):
+        """(text, colour) while a new dial setting is on its way, else None. 'ready' shows for
+        three minutes; the others until they change."""
+        now = time.time()
+        if now - getattr(self, "_ds_read", 0) > 1:
+            self._ds_read = now
+            try:
+                with open(DIAL_STATUS, encoding="utf-8") as f:
+                    self._ds = json.load(f)
+            except (OSError, ValueError):
+                self._ds = None
+        ds = self._ds
+        if not ds or ds.get("state") not in DIAL_STEPS:
+            return None
+        if now - ds.get("at", 0) > (180 if ds["state"] == "ready" else 600):
+            return None
+        return DIAL_STEPS[ds["state"]]
 
     def forecast(self):
         """The weather director's latest forecast, re-read every few seconds; None if there isn't a fresh one."""
@@ -406,24 +485,99 @@ class Bar:
                 self._fc = None
         return self._fc
 
+    def halves(self):
+        """(left sections, right sections). Without the split everything is 'left'."""
+        shown = self.shown()
+        if not self.s.get("split", True):
+            return shown, []
+        cut = [k for k, _, _ in SECTIONS].index(SPLIT_AFTER)
+        order = {k: i for i, (k, _, _) in enumerate(SECTIONS)}
+        left = [x for x in shown if order[x[0]] <= cut]
+        right = [x for x in shown if order[x[0]] > cut]
+        return (left, right) if left and right else (shown, [])
+
+    def split_widths(self):
+        """(left part, gap, right part) in screen pixels, or None when not split."""
+        left, right = self.halves()
+        if not right:
+            return None
+        k = self.s["scale"]
+        lw = GAP + sum(w + GAP for _, w in left)
+        rw = GAP + sum(w + GAP for _, w in right)
+        return int(lw * k), int(self.s.get("split_gap", 540)), int(rw * k)
+
     def size(self):
         k = self.s["scale"]
-        base_w = GAP + sum(w + GAP for _, w in self.shown()) if self.shown() else 300
         drop = DROP if self.s["show"].get("speed", True) else 0
+        sp = self.split_widths()
+        if sp:
+            return sum(sp), int((BASE_H + drop) * k)
+        base_w = GAP + sum(w + GAP for _, w in self.shown()) if self.shown() else 300
         return int(base_w * k), int((BASE_H + drop) * k)
 
     def place(self):
         w, h = self.size()
-        if self.s["x"] is None:   # first run: centred along the top of the main screen
+        sp = self.split_widths()
+        if sp:                    # split: the gap sits exactly over the middle of the main screen
+            self.s["x"] = self.root.winfo_screenwidth() // 2 - sp[0] - sp[1] // 2
+        elif self.s["x"] is None:   # first run: centred along the top of the main screen
             self.s["x"] = (self.root.winfo_screenwidth() - w) // 2
-        self.root.geometry(f"{w}x{h}+{int(self.s['x'])}+{int(self.s['y'])}")
+        geom = f"{w}x{h}+{int(self.s['x'])}+{int(self.s['y'])}"
+        self.root.geometry(geom)
+        self.back.geometry(geom)
         self._placed = (w, h)
-        self.root.attributes("-alpha", self.s["alpha"])
+        self.root.attributes("-alpha", 1.0)                 # text and gauges: always solid
+        self.back.attributes("-alpha", self.s["alpha"])     # the panels: the Opacity setting
+        self.restack()
 
-    def no_focus(self):
+    @staticmethod
+    def hwnd(win):
+        return ctypes.windll.user32.GetParent(win.winfo_id()) or win.winfo_id()
+
+    def restack(self):
+        """Keep the backing window directly under the bar."""
+        try:
+            self.root.update_idletasks()
+            ctypes.windll.user32.SetWindowPos(self.hwnd(self.back), self.hwnd(self.root), 0, 0, 0, 0, 0x0013)
+        except Exception:
+            pass
+
+    def mirror(self):
+        """Move the panel fills (BG / PANEL) to the backing window; cut them out of the bar."""
+        cv, shapes = self.cv, []
+        for item in cv.find_all():
+            kind = cv.type(item)
+            if kind not in ("rectangle", "polygon"):
+                continue
+            fill = cv.itemcget(item, "fill")
+            if fill not in (BG, PANEL):
+                continue
+            shapes.append((kind, tuple(round(v, 1) for v in cv.coords(item)), fill))
+            cv.itemconfigure(item, fill=KEY)
+        if shapes != self._backdrop:            # redraw the backing only when the layout changes
+            self._backdrop = shapes
+            self.bcv.delete("all")
+            for kind, coords, fill in shapes:
+                (self.bcv.create_rectangle if kind == "rectangle" else self.bcv.create_polygon)(*coords, fill=fill, outline="")
+        now = time.time()
+        if now - getattr(self, "_restacked", 0) > 2:
+            self._restacked = now
+            self.restack()
+
+    def set_visible(self, on):
+        """Show / hide both layers without ever taking the focus from the game."""
+        if on == getattr(self, "_visible", True):
+            return
+        self._visible = on
+        for win in (self.back, self.root) if on else (self.root, self.back):
+            ctypes.windll.user32.ShowWindow(self.hwnd(win), 4 if on else 0)   # SW_SHOWNOACTIVATE / SW_HIDE
+        if on:
+            self.restack()
+
+    def no_focus(self, win):
         """WS_EX_NOACTIVATE + WS_EX_TOOLWINDOW: never steals focus, no taskbar button."""
         u = ctypes.windll.user32
-        hwnd = u.GetParent(self.root.winfo_id()) or self.root.winfo_id()
+        hwnd = self.hwnd(win)
         GWL_EXSTYLE, NOACTIVATE, TOOLWINDOW, APPWINDOW = -20, 0x08000000, 0x00000080, 0x00040000
         style = u.GetWindowLongW(hwnd, GWL_EXSTYLE)
         u.SetWindowLongW(hwnd, GWL_EXSTYLE, (style | NOACTIVATE | TOOLWINDOW) & ~APPWINDOW)
@@ -435,8 +589,11 @@ class Bar:
         if self.s["locked"]:
             return
         dx, dy = self._drag
-        self.s["x"], self.s["y"] = e.x_root - dx, e.y_root - dy
+        if not self.split_widths():         # split: it stays centred, only up / down moves
+            self.s["x"] = e.x_root - dx
+        self.s["y"] = e.y_root - dy
         self.root.geometry(f"+{self.s['x']}+{self.s['y']}")
+        self.back.geometry(f"+{self.s['x']}+{self.s['y']}")
 
     def wheel(self, e):
         step = 1 if e.delta > 0 else -1
@@ -462,6 +619,9 @@ class Bar:
         win.title("TruckBar settings")
         win.attributes("-topmost", True)
         win.protocol("WM_DELETE_WINDOW", self.close_settings)
+        # Fixed size: no maximise button, no edge-resizing, and Windows Snap can't stretch it to
+        # half the screen. It is laid out at its natural size, so nothing inside is ever cut off.
+        win.resizable(False, False)
         pad = {"padx": 14, "pady": 3, "sticky": "w"}
         lab = {"bg": BG, "fg": TXT, "font": (FONT, 11)}
         chk = dict(lab, selectcolor=PANEL, activebackground=BG, activeforeground=TXT)
@@ -478,7 +638,7 @@ class Bar:
 
         tk.Label(win, text="Look", font=(FONT, 12, "bold"), bg=BG, fg=AMBER).grid(row=row, column=0, columnspan=2, padx=14, pady=(12, 4), sticky="w")
         row += 1
-        tk.Label(win, text="Opacity", **lab).grid(row=row, column=0, **pad)
+        tk.Label(win, text="Panel opacity", **lab).grid(row=row, column=0, **pad)
         op = tk.Scale(win, from_=20, to=100, orient="horizontal", length=260, bg=BG, fg=TXT, highlightthickness=0,
                       troughcolor=PANEL, command=lambda v: self.set_live("alpha", int(v) / 100))
         op.set(int(s["alpha"] * 100))
@@ -521,6 +681,11 @@ class Bar:
                        command=lambda: self.set_live("clock_24h", self._clock.get()),
                        **chk).grid(row=row, column=0, columnspan=2, **pad)
         row += 1
+        self._lflash = tk.BooleanVar(value=s.get("limit_flash", True))
+        tk.Checkbutton(win, text="Flash the speed limit sign 4 times when the limit changes", variable=self._lflash,
+                       command=lambda: self.set_live("limit_flash", self._lflash.get()),
+                       **chk).grid(row=row, column=0, columnspan=2, **pad)
+        row += 1
 
         tk.Label(win, text="Position", font=(FONT, 12, "bold"), bg=BG, fg=AMBER).grid(row=row, column=0, columnspan=2, padx=14, pady=(12, 4), sticky="w")
         row += 1
@@ -533,6 +698,20 @@ class Bar:
         tk.Button(nud, text="Centre along top", command=lambda: self.changed(recentre=True) or self.set_live("y", 0),
                   **dict(btn, width=16)).grid(row=0, column=4, padx=(10, 0))
         row += 1
+        self._split = tk.BooleanVar(value=s.get("split", True))
+        tk.Checkbutton(win, text="Split around the game's messages (keeps the middle clear)", variable=self._split,
+                       command=lambda: self.set_live("split", self._split.get()), **chk).grid(row=row, column=0, columnspan=2, **pad)
+        row += 1
+        tk.Label(win, text="Gap width", **lab).grid(row=row, column=0, **pad)
+        gp = tk.Scale(win, from_=300, to=1000, resolution=10, orient="horizontal", length=260, bg=BG, fg=TXT,
+                      highlightthickness=0, troughcolor=PANEL, command=lambda v: self.set_live("split_gap", int(v)))
+        gp.set(int(s.get("split_gap", 540)))
+        gp.grid(row=row, column=1, padx=14, sticky="w")
+        row += 1
+        self._autohide = tk.BooleanVar(value=s.get("auto_hide", True))
+        tk.Checkbutton(win, text="Hide when not driving (paused, menus, garage, title screen)", variable=self._autohide,
+                       command=lambda: self.set_live("auto_hide", self._autohide.get()), **chk).grid(row=row, column=0, columnspan=2, **pad)
+        row += 1
         self._lock = tk.BooleanVar(value=s["locked"])
         tk.Checkbutton(win, text="Lock position (no dragging)", variable=self._lock,
                        command=lambda: self.set_live("locked", self._lock.get()), **chk).grid(row=row, column=0, columnspan=2, **pad)
@@ -540,6 +719,7 @@ class Bar:
 
         # weather map and keys in a second column, so the window fits a 1440-high screen
         right = self._map_settings(win, 0, pad, lab, btn, c=2)
+        right = self._dial_settings(win, right, pad, lab, c=2)
         right = self._key_settings(win, right, pad, lab, btn, c=2)
         row = max(row, right)
 
@@ -550,8 +730,13 @@ class Bar:
         tk.Label(win, text=f"{self.key('settings')} opens and closes this window", bg=BG, fg=DIM, font=(FONT, 9)).grid(row=row + 1, column=0, columnspan=4, padx=14, pady=(0, 10), sticky="w")
 
         win.update_idletasks()
-        x = self.root.winfo_x() + (self.root.winfo_width() - win.winfo_width()) // 2
-        win.geometry(f"+{max(0, x)}+{self.root.winfo_y() + self.root.winfo_height() + 20}")
+        x = self.root.winfo_x() + (self.root.winfo_width() - win.winfo_reqwidth()) // 2
+        y = self.root.winfo_y() + self.root.winfo_height() + 20
+        # keep the whole window, title bar included, inside the screen the bar is on
+        left, top, right, bottom = work_area(self.root.winfo_x() + self.root.winfo_width() // 2, self.root.winfo_y())
+        x = max(left, min(x, right - win.winfo_reqwidth() - 16))
+        y = max(top, min(y, bottom - win.winfo_reqheight() - 48))
+        win.geometry(f"+{x}+{y}")
         win.lift()
         win.focus_force()
 
@@ -602,6 +787,73 @@ class Bar:
             tk.Button(nud, text=txt, command=lambda dx=dx, dy=dy: self.nudge_map(dx, dy), **btn).grid(row=0, column=i, padx=2)
         tk.Button(nud, text="Open / close the map", command=self.toggle_map, **dict(btn, width=18)).grid(
             row=0, column=4, padx=(10, 0))
+        return row + 1
+
+    def _dial_settings(self, win, row, pad, lab, c=0):
+        """The weather dial, 1-10: how far the weather strays from the norm. Written to the
+        weather program's settings; it plans each session's weather when the game closes, so
+        a change only shows from the session after next game exit."""
+        if not os.path.isdir(os.path.dirname(WEATHER_SETTINGS)):
+            return row
+        try:
+            ws = json.load(open(WEATHER_SETTINGS, encoding="utf-8"))
+        except (OSError, ValueError):
+            ws = {}
+        old = {"realistic": 2, "lively": 5, "stormy": 9}
+        try:
+            cur = max(1, min(10, int(ws.get("dial", old.get(ws.get("weather"), 2)))))
+        except (TypeError, ValueError):
+            cur = 2
+        tk.Label(win, text="Weather dial", font=(FONT, 12, "bold"), bg=BG, fg=AMBER).grid(
+            row=row, column=c, columnspan=2, padx=14, pady=(12, 4), sticky="w")
+        row += 1
+        words = tk.Label(win, text=DIAL_WORDS[cur], bg=BG, fg=TXT, font=(FONT, 10), wraplength=420, justify="left")
+        note = tk.Label(win, text="", bg=BG, fg=AMBER, font=(FONT, 9), wraplength=420, justify="left")
+
+        def changed(v):
+            n = int(float(v))
+            words.configure(text=DIAL_WORDS[n])
+            try:
+                data = json.load(open(WEATHER_SETTINGS, encoding="utf-8"))
+            except (OSError, ValueError):
+                data = {}
+            if data.get("dial") == n:
+                return
+            data["dial"] = n
+            data.pop("weather", None)            # the old three-word setting; the dial replaces it
+            tmp = WEATHER_SETTINGS + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, WEATHER_SETTINGS)
+            note.configure(text=f"Set to {n}. To change the weather now: Esc > Exit to the title screen. The new "
+                                "weather builds in about 20 seconds - TruckBar says when it's ready - then load your save.")
+
+        tk.Label(win, text="1 real  ·  2 normal  ·  10 worst", **lab).grid(row=row, column=c, **pad)
+        dial = tk.Scale(win, from_=1, to=10, orient="horizontal", length=260, bg=BG, fg=TXT, highlightthickness=0,
+                        troughcolor=PANEL)
+        dial.set(cur)
+        dial.configure(command=changed)
+        dial.grid(row=row, column=c + 1, padx=14, sticky="w")
+        row += 1
+        words.grid(row=row, column=c, columnspan=2, padx=14, pady=(0, 2), sticky="w")
+        row += 1
+        tk.Label(win, text="⚠ The drive you're on keeps its weather. A new setting needs a trip to the title screen "
+                          "(about 20 seconds to build), or it starts next time you play.",
+                 bg=BG, fg=AMBER, font=(FONT, 9), wraplength=420, justify="left").grid(
+            row=row, column=c, columnspan=2, padx=14, sticky="w")
+        row += 1
+        note.grid(row=row, column=c, columnspan=2, padx=14, sticky="w")
+        row += 1
+        live = tk.Label(win, text="", bg=BG, fg=AMBER, font=(FONT, 10, "bold"), wraplength=420, justify="left")
+        live.grid(row=row, column=c, columnspan=2, padx=14, sticky="w")
+
+        def poll():
+            if self.win is not win or not win.winfo_exists():
+                return
+            prog = self.dial_progress()
+            live.configure(text=prog[0] if prog else "", fg=prog[1] if prog else AMBER)
+            win.after(1000, poll)
+        poll()
         return row + 1
 
     def key(self, name):
@@ -734,12 +986,20 @@ class Bar:
             if t is not None and t.plugin_revision and t.plugin_revision != T.PLUGIN_REVISION:
                 self.draw_waiting(f"TruckBar needs scs-telemetry plugin revision {T.PLUGIN_REVISION}, "
                                   f"the game has revision {t.plugin_revision} - see the README")
-            elif t is not None and t.sdkActive:
+            elif t is not None and t.sdkActive and not (t.paused and self.s.get("auto_hide", True)):
+                self.set_visible(True)
                 self.seen_game = True
                 self.game_id = t.game
                 self.follow_controls(t)
                 self.draw(t)
+            elif self.s.get("auto_hide", True) and self.win is None and not self.dial_progress():
+                # paused, a menu, the garage, the title screen, or no game: out of the way
+                if t is not None and t.sdkActive:
+                    self.seen_game = True
+                    self.game_id = t.game
+                self.set_visible(False)
             else:
+                self.set_visible(True)
                 self.draw_waiting()
             now = time.time()
             if self.exit_with_game and now - self.last_game_check > 5:
@@ -752,6 +1012,10 @@ class Bar:
         except Exception as ex:   # never die mid-drive; show it instead
             self.cv.delete("all")
             self.cv.create_text(10, 10, anchor="nw", fill=RED, font=(FONT, 10), text=f"TruckBar error: {ex}")
+        try:
+            self.mirror()
+        except Exception:
+            pass
         self.root.after(int(1000 / FPS), self.tick)
 
     # -- drawing helpers --------------------------------------------------------
@@ -865,8 +1129,16 @@ class Bar:
         cv.delete("all")
         w, h = self.size()
         bh = self.k(BASE_H)
-        cv.create_rectangle(0, 0, w, bh, fill=BG, outline=EDGE)
-        cv.create_text(w / 2, bh / 2, fill=AMBER if message else DIM, font=self.f(12),
+        sp = self.split_widths()
+        if sp:
+            cv.create_rectangle(0, 0, sp[0], bh, fill=BG, outline=EDGE)
+            cv.create_rectangle(sp[0] + sp[1], 0, w, bh, fill=BG, outline=EDGE)
+        else:
+            cv.create_rectangle(0, 0, w, bh, fill=BG, outline=EDGE)
+        prog = None if message else self.dial_progress()
+        if prog:
+            message = prog[0]
+        cv.create_text(w - sp[2] / 2 if sp else w / 2, bh / 2, fill=(prog[1] if prog else AMBER) if message else DIM, font=self.f(12),
                        text=message or f"TruckBar - waiting for ATS / ETS2 to start…   ({self.key('settings')} for settings)")
 
     def draw(self, t):
@@ -875,12 +1147,20 @@ class Bar:
         w, h = self.size()
         if (w, h) != getattr(self, "_placed", None):   # a section came or went (the weather pane
             self.place()                               # appears once the forecast does): resize
-        cv.create_rectangle(0, 0, w, self.k(BASE_H), fill=BG, outline=EDGE)   # the bar; below it is see-through
+        sp = self.split_widths()
+        if sp:   # two bars with the gap for the game's notices between them; below is see-through
+            cv.create_rectangle(0, 0, sp[0], self.k(BASE_H), fill=BG, outline=EDGE)
+            cv.create_rectangle(sp[0] + sp[1], 0, w, self.k(BASE_H), fill=BG, outline=EDGE)
+        else:
+            cv.create_rectangle(0, 0, w, self.k(BASE_H), fill=BG, outline=EDGE)   # the bar; below it is see-through
+        right = {key for key, _ in self.halves()[1]}
         ctx = {"ats": t.game != 1}
         ctx["sp_mul"], ctx["sp_unit"] = (MPS_TO_MPH, "mph") if ctx["ats"] else (MPS_TO_KMH, "km/h")
         ctx["limit"] = round(t.speedLimit * ctx["sp_mul"])
         x = GAP
         for key, width in self.shown():
+            if sp and key in right and x < (sp[0] + sp[1]) / self.s["scale"]:
+                x = (sp[0] + sp[1]) / self.s["scale"] + GAP     # jump over the gap
             before = len(cv.find_all())
             if key == "speed":   # hangs below the bar: its own background, then the panel
                 cv.create_rectangle(0, 0, self.k(width + 2 * GAP), self.k(BASE_H + DROP), fill=BG, outline=EDGE)
@@ -899,14 +1179,32 @@ class Bar:
         self.arrow(8, 56, True, t.blinkerLeftOn)
         self.arrow(116, 56, False, t.blinkerRightOn)
         limit = c["limit"]
+        face = "#f2f2f2" if limit else OFF
+        if self.limit_flashing(limit):
+            face = AMBER
         # a smaller sign now - the limit is also notched on the speedometer
         if c["ats"]:
-            cv.create_rectangle(k(40), k(24), k(84), k(88), fill="#f2f2f2" if limit else OFF, outline="#111", width=2)
+            cv.create_rectangle(k(40), k(24), k(84), k(88), fill=face, outline="#111", width=2)
             cv.create_text(k(62), k(39), text="SPEED\nLIMIT", fill="#111", font=self.f(6, "bold"), justify="center")
             cv.create_text(k(62), k(70), text=str(limit) if limit else "–", fill="#111", font=self.f(15, "bold"))
         else:
-            cv.create_oval(k(40), k(36), k(84), k(80), fill="#f2f2f2" if limit else OFF, outline=RED, width=k(4))
+            cv.create_oval(k(40), k(36), k(84), k(80), fill=face, outline=RED, width=k(4))
             cv.create_text(k(62), k(58), text=str(limit) if limit else "–", fill="#111", font=self.f(14, "bold"))
+
+    def limit_flashing(self, limit):
+        """True while the sign should be lit amber: 4 blinks after the posted limit changes.
+        A limit of 0 (no sign, a yard, some junctions) is ignored, so 55 -> 0 -> 55 doesn't blink,
+        and neither does the first limit seen after TruckBar starts."""
+        now = time.time()
+        if limit:
+            last = getattr(self, "_limit_last", None)
+            if last is not None and limit != last and self.s.get("limit_flash", True):
+                self._limit_flash_from = now
+            self._limit_last = limit
+        since = now - getattr(self, "_limit_flash_from", -99.0)
+        if since >= LIMIT_FLASHES * LIMIT_FLASH_PERIOD or not self.s.get("limit_flash", True):
+            return False
+        return (since % LIMIT_FLASH_PERIOD) < LIMIT_FLASH_PERIOD / 2
 
     def s_speed(self, t, c):
         cv, k = self.cv, self.k
@@ -975,6 +1273,9 @@ class Bar:
             self.badge(x0 + 92, y2, "HIGH", BLUE if (t.lightsBeamHigh and live) else None, 40)
         self.badge(x0 + 138, y2, "BCN", AMBER if (t.lightsBeacon and live) else None, 40)
         self.badge(x0 + 184, y2, "HAZ", AMBER if (t.lightsHazard and live) else None, 40)
+        # The telemetry has no trailer brake, and the game's control is hold-to-apply: lit while its
+        # key or button is held.
+        self.badge(x0 + 230, y2, "TRL", RED if (self.watcher and self.watcher.held.get("trailerbrake")) else None, 36)
         if steps:
             for i in range(steps):
                 on = i < ret
@@ -1040,8 +1341,8 @@ class Bar:
         cv.create_arc(k(20), k(16), k(80), k(76), start=210, extent=-30, style="arc", outline=RED, width=max(1, k(3)))
         cv.create_text(k(24), k(94), text="FUEL", fill=DIM, font=self.f(7))
         cv.create_text(k(52), k(94), text="DEF" if ats else "AdB", fill=DIM, font=self.f(7))
-        dcap = t.adblueCapacity or 1
-        dq = math.ceil(4 * t.adblue / dcap) if t.adblue > 0 else 0
+        dlevel, dcap = self.def_level(t, c["ats"])
+        dq = math.ceil(4 * dlevel / dcap) if dlevel > 0 else 0
         for i in range(4):
             on = i < dq
             cv.create_rectangle(k(66 + i * 9), k(90), k(73 + i * 9), k(98),
@@ -1074,11 +1375,32 @@ class Bar:
             val, lab = f"{dist(stop):,.0f} {unit}", "FUEL STOP IN"
             col = RED if rng_km < 100 else AMBER
         elif t.onJob and route_km > 0:
-            val, lab, col = f"{dist(rng_km):,.0f} {unit}", "RANGE · MAKES IT", GREEN
+            val, lab, col = f"{dist(rng_km):,.0f} {unit}", "RANGE", GREEN
         else:
             val, lab, col = f"{dist(rng_km):,.0f} {unit}", "RANGE", TXT
         cv.create_text(k(144), k(74), text=val, fill=col, font=self.f(12, "bold"))
         cv.create_text(k(144), k(92), text=lab, fill=DIM, font=self.f(7))
+
+    def def_level(self, t, ats):
+        """(level, tank size). ATS reports no DEF at all for some trucks (tank size 0). TM Real
+        Walk simulates it for those and keeps the level per truck model in a small file."""
+        if t.adblueCapacity > 0:
+            return t.adblue, t.adblueCapacity
+        now = time.time()
+        if now - getattr(self, "_def_read", 0) > 15:
+            self._def_read = now
+            levels = {}
+            try:
+                name = "adblue_ats.ini" if ats else "adblue_ets2.ini"
+                with open(os.path.join(os.environ.get("APPDATA", ""), "TMRealWalk", name), encoding="utf-8") as f:
+                    for line in f:
+                        key, _, value = line.partition("=")
+                        levels[key.strip()] = float(value)
+            except (OSError, ValueError):
+                pass
+            self._def_levels = levels
+        truck = t.truckId.decode("utf-8", "replace")
+        return getattr(self, "_def_levels", {}).get(truck, 0.0), 80.0
 
     def s_gauges(self, t, c):
         ats = c["ats"]
@@ -1222,6 +1544,9 @@ class Bar:
         quiet = ahead.startswith("Dry for")
         lines = [(ahead, BLUE if road.get("wet_now") else (DIM if quiet else TXT)),
                  (road.get("later", ""), DIM)]
+        prog = self.dial_progress()
+        if prog:
+            lines[0] = prog
         for (text, col), y in zip(lines, (72, 92)):
             if not text:
                 continue

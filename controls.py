@@ -17,7 +17,7 @@ import re
 import threading
 import time
 
-ACTIONS = ("wipers", "wipersback")
+ACTIONS = ("wipers", "wipersback", "trailerbrake")
 
 _VK = {"space": 0x20, "enter": 0x0D, "numenter": 0x0D, "tab": 0x09, "esc": 0x1B, "back": 0x08,
        "backspace": 0x08, "del": 0x2E, "ins": 0x2D, "home": 0x24, "end": 0x23, "pgup": 0x21,
@@ -144,6 +144,7 @@ class ControlWatcher(threading.Thread):
         self.game_getter = game_getter          # returns 1 (ETS2) / 2 (ATS) / None
         self.lock = threading.Lock()
         self.counts = {a: 0 for a in ACTIONS}
+        self.held = {a: False for a in ACTIONS}  # physically down right now
         self.bindings = {}
         self.summary = "no bindings read yet"
         self.auto_high_beams = False
@@ -203,4 +204,5 @@ class ControlWatcher(threading.Thread):
                     with self.lock:
                         self.counts[action] += 1
                 down[action] = pressed
+                self.held[action] = pressed
             time.sleep(0.01)
