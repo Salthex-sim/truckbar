@@ -77,7 +77,12 @@ edits made while it's running are overwritten.
 | `x` | `null` | Bar's left edge in screen pixels. `null` = centred on the main screen. |
 | `y` | `0` | Bar's top edge in screen pixels. |
 | `scale` | `1.0` | Size, `0.5` – `2.0`. |
-| `alpha` | `0.85` | Opacity, `0.2` – `1.0`. |
+| `alpha` | `0.85` | Panel opacity, `0.2` – `1.0`. Text and gauges are always fully opaque. |
+| `split` | `true` | Split the bar into two halves with a gap in the middle of its screen. |
+| `split_gap` | `540` | Width of that gap in screen pixels. |
+| `auto_hide` | `true` | Hide the bar while the game is paused or in menus, the garage or the title screen. |
+| `limit_flash` | `true` | Flash the speed-limit sign's lettering when the limit changes. |
+| `limit_chime` | `true` | Three short beeps when the limit changes. The sound is written once to `limit_chime.wav` beside this file. |
 | `locked` | `false` | `true` stops the bar being dragged. |
 | `gear_names` | `"auto"` | `"auto"` names gears like your dash; `"numbers"` always shows 1, 2, 3… |
 | `clock_24h` | `false` | `true` for a 24-hour clock. |
@@ -172,7 +177,7 @@ a half-written file.
   "dest": [39.74, -104.99],
   "road": {
     "temp": 46, "now_sky": "Mostly cloudy", "high": 52, "low": 38,
-    "ahead": "Rain in 1½ hours", "later": "At Denver: Rain, 42°",
+    "ahead": "70% chance of rain · starting in 1½ hours", "later": "At Denver: Rain, 42°",
     "wet_now": false
   }
 }
@@ -185,7 +190,7 @@ a half-written file.
 | `now.temp`, `now.sky` | yes | Shown when `road` doesn't give them |
 | `high`, `low` | | Header, when there's no alert |
 | `alert` | | Replaces high/low in amber, e.g. `"Winter storm"` |
-| `road.*` | | What's ahead on your route. `ahead` and `later` are the pane's two lines. A line starting `Dry for` is drawn dimmed. `wet_now: true` draws `ahead` in blue. |
+| `road.*` | | What's ahead on your route. `ahead` and `later` are the pane's two lines. A line starting `Dry for` or ending `dry for 12 hours` is drawn dimmed. `wet_now: true` draws `ahead` in blue. |
 | `lat`, `lon` | for the map | Where the truck marker goes |
 | `dest` | for the map | `[lat, lon]` of the destination. Draws the dashed line and square marker. |
 

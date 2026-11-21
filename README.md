@@ -11,7 +11,13 @@ warnings, fuel and your job at a glance, and nothing covers your mirrors.
 - Reads the game's live telemetry. It doesn't change the game, install a mod or capture the screen.
 - **Never takes keyboard focus.** Per-game profiles in Razer Synapse, Logitech G HUB and
   similar tools stay on the game.
-- Adjustable opacity and size, and every section can be shown or hidden.
+- Adjustable panel opacity and size, and every section can be shown or hidden. The text and
+  gauges stay solid however see-through the panels are, so the bar stays readable against a bright sky.
+- **Split in two** around the middle of the screen, so the game's own messages ("Fuel tank is
+  full!", job offers) are never hidden behind it.
+- **Hides itself** in the game's menus, the garage and the title screen, and while paused.
+- **Speed limit changes** catch your eye: the sign's lettering flashes orange and, if you like,
+  three quick beeps sound.
 - Optional **weather map** that pops out on any screen, if you run a weather program alongside it.
 - Hotkeys you can change, including to a macro-pad key. See [Customizing](docs/CUSTOMIZING.md).
 - Works with single screens, ultrawides and triple-screen setups.
@@ -20,13 +26,15 @@ warnings, fuel and your job at a glance, and nothing covers your mirrors.
 
 ## What's on the bar
 
-From left to right. Every section can be switched off.
+From left to right. Every section can be switched off. With **Split** on (the default),
+Signals to Warnings sit left of a gap in the middle of the screen and Compass to Clock sit
+right of it; the gap is 540 px wide by default and can be changed in Settings.
 
 | Section | Shows |
 |---|---|
-| **Signals** | Left/right turn signals and the posted speed limit (US sign in ATS, EU roundel in ETS2) |
+| **Signals** | Left/right turn signals and the posted speed limit (US sign in ATS, EU roundel in ETS2). The sign flashes when the limit changes (see [Speed limit changes](#speed-limit-changes)). |
 | **Speed** | Big speedometer, tachometer, gear, cruise set speed. This panel hangs slightly below the bar. |
-| **Status lights** | Park brake, retarder (with its current step), engine/Jake brake, diff lock, lift axle, **wiper speed**, side/low/high beams (with **automatic high beams**), beacon, hazards, plus a row of pips counting retarder steps. Lights and wipers stay blank with the key off. |
+| **Status lights** | Park brake, retarder (with its current step), engine/Jake brake, diff lock, lift axle, **wiper speed**, side/low/high beams (with **automatic high beams**), beacon, hazards, **TRL** (trailer brake, red while you hold its control), plus a row of pips counting retarder steps. Lights and wipers stay blank with the key off. |
 | **Warnings** | Low air, emergency brake, oil pressure, coolant temperature, low fuel, low DEF/AdBlue, battery |
 | **Compass** | A scrolling compass tape with the direction you're facing under the centre mark, plus the 16-point heading and degrees (e.g. `ENE 068°`) |
 | **Fuel** | Fuel gauge with reserve zone, DEF/AdBlue level, air pressure, average economy, and **range / fuel stop**: whether your fuel covers the rest of the job, or how far you can go before you need to stop |
@@ -58,10 +66,26 @@ margin in hand (75 mi / 120 km by default; change it in Settings).
 
 | Shows | Meaning |
 |---|---|
-| **640 mi**, *RANGE · MAKES IT* (green) | You can finish the job on the fuel you have |
+| **640 mi**, *RANGE* (green) | You can finish the job on the fuel you have |
 | **420 mi**, *FUEL STOP IN* (amber, steady) | You'll need to refuel. Start looking within that distance. Normal on a long haul. |
 | **40 mi**, *FUEL STOP IN* (red) | Under about 60 mi / 100 km of range left |
 | **RANGE** (white) | No job: just how far the fuel on board will take you |
+
+### Speed limit changes
+
+When the posted limit changes, the numbers on the sign blink **orange** four times over four
+seconds, and three short beeps sound. Each can be switched off in Settings. Ticking the beeps
+back on plays them once so you can hear them.
+
+Neither goes off when you first start driving, or when a limit briefly disappears and comes
+back the same (as it does at some junctions). The beeps still sound with the Signals section
+hidden.
+
+### Trailer brake
+
+The game's telemetry doesn't report the trailer brake, so the **TRL** light watches the key or
+button you've bound to *Trailer brake* in your profile's `controls.sii` (as for the wipers below)
+and turns red while you hold it.
 
 ### High beams and wipers
 
@@ -119,9 +143,12 @@ named by the `TRUCKBAR_FORECAST` environment variable) every few seconds:
 ```
 OCT 24 · Colorado Springs      H46° L28°
 46°  Mostly cloudy
-Rain in 1½ hours
+70% chance of rain · starting in 1½ hours
 At Denver: Rain, 42°
 ```
+
+The middle line is drawn in blue while it's raining or snowing, and dimmed when nothing is on
+the way.
 
 The pane can be switched off like any other section in Settings.
 
@@ -239,7 +266,7 @@ Both can be changed under **Keys** in the settings window.
 | **Ctrl + Alt + W** | Open or close the **weather map** (needs a weather director). |
 | Drag the bar | Move it (only when the mouse is free, e.g. in the game's menus) |
 | Mouse wheel on the bar | Bigger or smaller |
-| Ctrl + mouse wheel | More or less see-through |
+| Ctrl + mouse wheel | Panels more or less see-through |
 | Right-click the bar | Open the settings window |
 
 > **Tip:** ATS and ETS2 treat focus moving away from the game like letting go of the
@@ -249,14 +276,20 @@ Both can be changed under **Keys** in the settings window.
 ### The settings window
 
 - **Show on the bar:** tick or untick each section. The bar shrinks to fit.
-- **Opacity:** 20% to 100%.
+- **Panel opacity:** 20% to 100%. Only the panels fade; the text and gauges stay solid.
 - **Size:** 50% to 200%.
 - **Gear names like the dash:** see [Gear names](#gear-names).
 - **Fuel stop margin:** how much range to keep in reserve when working out the fuel stop.
 - **Wiper speeds:** 3 (intermittent, low, high) or 2 (low, high), to match your truck.
 - **24-hour clock:** off gives 12-hour with AM/PM.
+- **Flash the speed limit sign** and **Three quick beeps:** see [Speed limit changes](#speed-limit-changes).
 - **Position:** arrow buttons nudge the bar. **Centre along top** puts it back.
+- **Split around the game's messages** and **Gap width:** split the bar into two halves with a
+  clear gap in the middle (off puts every section in one row).
+- **Hide when not driving:** hides the bar while paused, in menus, the garage and the title screen.
 - **Lock position:** stops accidental dragging.
+- **Weather dial:** appears only when a weather program that supports it is installed: how far
+  its weather strays from the norm, 1 to 10.
 - **Weather map:** which screen and corner it opens in, its size, and arrow buttons to fine-tune.
 - **Keys:** click a hotkey, then press the new combination (Esc cancels). It needs Ctrl, Alt,
   Shift or Win plus a key, because it works in every program. F13–F24, Pause and Scroll Lock
@@ -289,6 +322,14 @@ Another program has claimed that hotkey. Open settings by right-clicking the bar
 game's menu, where the mouse is free, and pick a different key under **Keys**. The settings
 window lists any key that another program has taken.
 
+**The bar disappears when I pause or go to the menus.**
+That's **Hide when not driving**. It comes back when you drive on. Untick it in Settings to keep
+the bar up all the time.
+
+**DEF / AdBlue shows a dash.**
+Some trucks report no DEF tank to the telemetry. If you use the Real Walk mod, TruckBar reads its
+per-truck DEF levels instead; otherwise there's nothing to show.
+
 **The bar is hidden behind the game.**
 Run the game in **borderless** or **windowed** mode. Exclusive fullscreen draws over every
 other window, TruckBar included.
@@ -308,8 +349,9 @@ hide the sections you don't use.
 The scs-telemetry plugin publishes the game's live data in a block of shared memory
 (`Local\SCSTelemetry`). `telemetry.py` maps that block into Python using the plugin's own
 struct layout. The field offsets are checked against the plugin's header when TruckBar starts.
-`truckbar.pyw` draws the bar with Tkinter as an always-on-top, non-activating window,
-with see-through areas around the dropped speed panel.
+`truckbar.pyw` draws the bar with Tkinter as always-on-top, non-activating windows: a
+translucent backing window carries the panels, and the text and gauges are drawn fully opaque on
+a second window above it, so the opacity setting never fades the numbers.
 
 ## Credits
 
