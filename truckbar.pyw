@@ -109,8 +109,10 @@ DIAL_WORDS = {
 DEFAULTS = {"x": None, "y": 0, "scale": 1.0, "alpha": 0.85, "locked": False,
             "gear_names": "auto", "clock_24h": False, "fuel_margin_km": 120, "wiper_speeds": 3, "show": {k: True for k, _, _ in SECTIONS},
             "hotkeys": {"settings": "Ctrl+Alt+B", "map": "Ctrl+Alt+W"},
-            "split": True, "split_gap": 540, "auto_hide": True, "limit_flash": True}
-LIMIT_FLASHES, LIMIT_FLASH_PERIOD = 4, 0.5   # the sign blinks 4 times, half a second each, on a new limit
+            "split": True, "split_gap": 540, "auto_hide": True, "limit_flash": True, "limit_chime": True}
+# On a new limit the sign's lettering blinks 4 times over 4 s: orange for 0.7 s, black for 0.3 s
+LIMIT_FLASHES, LIMIT_FLASH_PERIOD, LIMIT_FLASH_ON = 4, 1.0, 0.7
+LIMIT_FLASH_INK = "#d04a00"                  # deep orange: catches the eye without reading as caution (amber) or warning (red)
 
 MPS_TO_MPH, MPS_TO_KMH = 2.23694, 3.6
 M_TO_MI, L_TO_GAL = 0.000621371, 0.264172
@@ -123,6 +125,41 @@ GEAR_NAMES = {
     18: ["LL", "LH"] + [f"{n}{s}" for n in range(1, 9) for s in "LH"],
     13: ["L", "1", "2", "3", "4"] + [f"{n}{s}" for n in range(5, 9) for s in "LH"],
 }
+
+
+CHIME = os.path.join(SETTINGS_DIR, "limit_chime.wav")
+# three quick beeps: (pitch Hz, beep length s, gap s, loudness 0-1)
+CHIME_TONE = (1320, 0.07, 0.05, 0.30)
+
+
+def play_chime():
+    """Three quick beeps on the default sound device, without waiting for them to finish.
+    The sound is written once as a small WAV next to the settings (winsound can't play a
+    sound from memory in the background)."""
+    try:
+        import struct
+        import wave
+        import winsound
+        if not os.path.exists(CHIME):
+            hz, beep, gap, vol = CHIME_TONE
+            rate, fade = 44100, int(44100 * 0.005)     # 5 ms fade in/out, so the beeps don't click
+            frames = bytearray()
+            n = int(rate * beep)
+            for b in range(3):
+                for i in range(n):
+                    env = min(1.0, i / fade, (n - 1 - i) / fade)
+                    frames += struct.pack("<h", int(32767 * vol * env * math.sin(2 * math.pi * hz * i / rate)))
+                if b < 2:
+                    frames += b"\0\0" * int(rate * gap)
+            os.makedirs(SETTINGS_DIR, exist_ok=True)
+            with wave.open(CHIME, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(rate)
+                w.writeframes(bytes(frames))
+        winsound.PlaySound(CHIME, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+    except Exception:
+        pass     # no sound is better than a crash mid-drive
 
 
 def load_settings():
@@ -686,6 +723,12 @@ class Bar:
                        command=lambda: self.set_live("limit_flash", self._lflash.get()),
                        **chk).grid(row=row, column=0, columnspan=2, **pad)
         row += 1
+        self._lchime = tk.BooleanVar(value=s.get("limit_chime", True))
+        tk.Checkbutton(win, text="Three quick beeps when the speed limit changes", variable=self._lchime,
+                       command=lambda: (self.set_live("limit_chime", self._lchime.get()),
+                                        self._lchime.get() and play_chime()),
+                       **chk).grid(row=row, column=0, columnspan=2, **pad)
+        row += 1
 
         tk.Label(win, text="Position", font=(FONT, 12, "bold"), bg=BG, fg=AMBER).grid(row=row, column=0, columnspan=2, padx=14, pady=(12, 4), sticky="w")
         row += 1
@@ -1157,6 +1200,7 @@ class Bar:
         ctx = {"ats": t.game != 1}
         ctx["sp_mul"], ctx["sp_unit"] = (MPS_TO_MPH, "mph") if ctx["ats"] else (MPS_TO_KMH, "km/h")
         ctx["limit"] = round(t.speedLimit * ctx["sp_mul"])
+        self.limit_watch(ctx["limit"])     # here, not in the sign, so the chime works with the sign hidden
         x = GAP
         for key, width in self.shown():
             if sp and key in right and x < (sp[0] + sp[1]) / self.s["scale"]:
@@ -1180,31 +1224,37 @@ class Bar:
         self.arrow(116, 56, False, t.blinkerRightOn)
         limit = c["limit"]
         face = "#f2f2f2" if limit else OFF
-        if self.limit_flashing(limit):
-            face = AMBER
+        ink = LIMIT_FLASH_INK if self.limit_flashing(limit) else "#111"   # the lettering blinks; the sign stays white
         # a smaller sign now - the limit is also notched on the speedometer
         if c["ats"]:
             cv.create_rectangle(k(40), k(24), k(84), k(88), fill=face, outline="#111", width=2)
-            cv.create_text(k(62), k(39), text="SPEED\nLIMIT", fill="#111", font=self.f(6, "bold"), justify="center")
-            cv.create_text(k(62), k(70), text=str(limit) if limit else "–", fill="#111", font=self.f(15, "bold"))
+            cv.create_text(k(62), k(39), text="SPEED\nLIMIT", fill=ink, font=self.f(6, "bold"), justify="center")
+            cv.create_text(k(62), k(70), text=str(limit) if limit else "–", fill=ink, font=self.f(15, "bold"))
         else:
             cv.create_oval(k(40), k(36), k(84), k(80), fill=face, outline=RED, width=k(4))
-            cv.create_text(k(62), k(58), text=str(limit) if limit else "–", fill="#111", font=self.f(14, "bold"))
+            cv.create_text(k(62), k(58), text=str(limit) if limit else "–", fill=ink, font=self.f(14, "bold"))
+
+    def limit_watch(self, limit):
+        """Called every frame: notices a new posted limit, starts the flash and plays the chime.
+        A limit of 0 (no sign, a yard, some junctions) is ignored, so 55 -> 0 -> 55 is not a change,
+        and neither is the first limit seen after TruckBar starts."""
+        if not limit:
+            return
+        last = getattr(self, "_limit_last", None)
+        self._limit_last = limit
+        if last is None or limit == last:
+            return
+        self._limit_flash_from = time.time()
+        if self.s.get("limit_chime", True):
+            play_chime()
 
     def limit_flashing(self, limit):
-        """True while the sign should be lit amber: 4 blinks after the posted limit changes.
-        A limit of 0 (no sign, a yard, some junctions) is ignored, so 55 -> 0 -> 55 doesn't blink,
-        and neither does the first limit seen after TruckBar starts."""
+        """True while the sign's lettering should be orange: 4 blinks after the posted limit changes."""
         now = time.time()
-        if limit:
-            last = getattr(self, "_limit_last", None)
-            if last is not None and limit != last and self.s.get("limit_flash", True):
-                self._limit_flash_from = now
-            self._limit_last = limit
         since = now - getattr(self, "_limit_flash_from", -99.0)
         if since >= LIMIT_FLASHES * LIMIT_FLASH_PERIOD or not self.s.get("limit_flash", True):
             return False
-        return (since % LIMIT_FLASH_PERIOD) < LIMIT_FLASH_PERIOD / 2
+        return (since % LIMIT_FLASH_PERIOD) < LIMIT_FLASH_ON
 
     def s_speed(self, t, c):
         cv, k = self.cv, self.k
@@ -1541,7 +1591,7 @@ class Bar:
         cv.create_text(k(78), k(48), anchor="w", text=road.get("now_sky", fc["now"]["sky"]), fill=TXT,
                        font=self.f(9), width=k(165))
         ahead = road.get("ahead", "")
-        quiet = ahead.startswith("Dry for")
+        quiet = ahead.startswith("Dry for") or ahead.endswith("dry for 12 hours")   # nothing coming: dim
         lines = [(ahead, BLUE if road.get("wet_now") else (DIM if quiet else TXT)),
                  (road.get("later", ""), DIM)]
         prog = self.dial_progress()
