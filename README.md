@@ -73,8 +73,8 @@ margin in hand (75 mi / 120 km by default; change it in Settings).
 
 ### Speed limit changes
 
-When the posted limit changes, the numbers on the sign blink **orange** four times over four
-seconds, and three short beeps sound. Each can be switched off in Settings. Ticking the beeps
+When the posted limit changes, the lettering on the sign blinks **orange** (or navy blue or dark
+green, picked in Settings) four times over four seconds, and three short beeps sound. Each can be switched off in Settings. Ticking the beeps
 back on plays them once so you can hear them.
 
 Neither goes off when you first start driving, or when a limit briefly disappears and comes
@@ -282,7 +282,8 @@ Both can be changed under **Keys** in the settings window.
 - **Fuel stop margin:** how much range to keep in reserve when working out the fuel stop.
 - **Wiper speeds:** 3 (intermittent, low, high) or 2 (low, high), to match your truck.
 - **24-hour clock:** off gives 12-hour with AM/PM.
-- **Flash the speed limit sign** and **Three quick beeps:** see [Speed limit changes](#speed-limit-changes).
+- **Flash the speed limit sign**, **Flash colour** and **Three quick beeps:** see
+  [Speed limit changes](#speed-limit-changes). Picking a colour flashes the sign at once, so you can compare them.
 - **Position:** arrow buttons nudge the bar. **Centre along top** puts it back.
 - **Split around the game's messages** and **Gap width:** split the bar into two halves with a
   clear gap in the middle (off puts every section in one row).

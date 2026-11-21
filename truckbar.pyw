@@ -109,10 +109,12 @@ DIAL_WORDS = {
 DEFAULTS = {"x": None, "y": 0, "scale": 1.0, "alpha": 0.85, "locked": False,
             "gear_names": "auto", "clock_24h": False, "fuel_margin_km": 120, "wiper_speeds": 3, "show": {k: True for k, _, _ in SECTIONS},
             "hotkeys": {"settings": "Ctrl+Alt+B", "map": "Ctrl+Alt+W"},
-            "split": True, "split_gap": 540, "auto_hide": True, "limit_flash": True, "limit_chime": True}
+            "split": True, "split_gap": 540, "auto_hide": True, "limit_flash": True, "limit_chime": True, "limit_flash_ink": "#d04a00"}
 # On a new limit the sign's lettering blinks 4 times over 4 s: orange for 0.7 s, black for 0.3 s
 LIMIT_FLASHES, LIMIT_FLASH_PERIOD, LIMIT_FLASH_ON = 4, 1.0, 0.7
 LIMIT_FLASH_INK = "#d04a00"                  # deep orange: catches the eye without reading as caution (amber) or warning (red)
+# Flash colours to choose from in settings (his shortlist 2026-11-21); stored as "limit_flash_ink"
+LIMIT_INKS = (("Orange", "#d04a00"), ("Navy blue", "#1e3a8a"), ("Dark green", "#166534"))
 
 MPS_TO_MPH, MPS_TO_KMH = 2.23694, 3.6
 M_TO_MI, L_TO_GAL = 0.000621371, 0.264172
@@ -723,6 +725,18 @@ class Bar:
                        command=lambda: self.set_live("limit_flash", self._lflash.get()),
                        **chk).grid(row=row, column=0, columnspan=2, **pad)
         row += 1
+        # Flash colour: picking one flashes the sign at once, so the colours can be compared on the bar
+        inks = tk.Frame(win, bg=BG)
+        tk.Label(inks, text="Flash colour:", **lab).pack(side="left")
+        self._link = tk.StringVar(value=s.get("limit_flash_ink", LIMIT_FLASH_INK))
+
+        def pick_ink():
+            self.set_live("limit_flash_ink", self._link.get())
+            self._limit_flash_from = time.time()
+        for name, colour in LIMIT_INKS:
+            tk.Radiobutton(inks, text=name, value=colour, variable=self._link, command=pick_ink, **chk).pack(side="left", padx=(8, 0))
+        inks.grid(row=row, column=0, columnspan=2, padx=(36, 14), pady=2, sticky="w")
+        row += 1
         self._lchime = tk.BooleanVar(value=s.get("limit_chime", True))
         tk.Checkbutton(win, text="Three quick beeps when the speed limit changes", variable=self._lchime,
                        command=lambda: (self.set_live("limit_chime", self._lchime.get()),
@@ -1224,7 +1238,7 @@ class Bar:
         self.arrow(116, 56, False, t.blinkerRightOn)
         limit = c["limit"]
         face = "#f2f2f2" if limit else OFF
-        ink = LIMIT_FLASH_INK if self.limit_flashing(limit) else "#111"   # the lettering blinks; the sign stays white
+        ink = self.s.get("limit_flash_ink", LIMIT_FLASH_INK) if self.limit_flashing(limit) else "#111"   # the lettering blinks; the sign stays white
         # a smaller sign now - the limit is also notched on the speedometer
         if c["ats"]:
             cv.create_rectangle(k(40), k(24), k(84), k(88), fill=face, outline="#111", width=2)

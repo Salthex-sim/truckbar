@@ -82,6 +82,7 @@ edits made while it's running are overwritten.
 | `split_gap` | `540` | Width of that gap in screen pixels. |
 | `auto_hide` | `true` | Hide the bar while the game is paused or in menus, the garage or the title screen. |
 | `limit_flash` | `true` | Flash the speed-limit sign's lettering when the limit changes. |
+| `limit_flash_ink` | `"#d04a00"` | Colour of the sign's lettering while it flashes. Settings offers orange `#d04a00`, navy blue `#1e3a8a` and dark green `#166534`; any `#rrggbb` works here. |
 | `limit_chime` | `true` | Three short beeps when the limit changes. The sound is written once to `limit_chime.wav` beside this file. |
 | `locked` | `false` | `true` stops the bar being dragged. |
 | `gear_names` | `"auto"` | `"auto"` names gears like your dash; `"numbers"` always shows 1, 2, 3… |
